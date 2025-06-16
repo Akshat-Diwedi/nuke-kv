@@ -1,13 +1,13 @@
 // utils.js
-const fs = require('fs');
+const fs = require('fs').promises; // Use fs.promises for async operations
 const path = require('path');
 
 const DB_FILE_PATH = path.join(__dirname, 'nukekv.db');
 
 // Function to save data to a file
-function saveToFile(data) {
+async function saveToFile(data) {
   try {
-    fs.writeFileSync(DB_FILE_PATH, JSON.stringify(data, null, 2));
+    await fs.writeFile(DB_FILE_PATH, JSON.stringify(data, null, 2));
     return true;
   } catch (err) {
     console.error('Error saving data to file:', err);
@@ -16,25 +16,33 @@ function saveToFile(data) {
 }
 
 // Function to load data from a file
-function loadFromFile() {
+async function loadFromFile() {
   try {
-    if (fs.existsSync(DB_FILE_PATH)) {
-      const fileData = fs.readFileSync(DB_FILE_PATH, 'utf-8');
-      return JSON.parse(fileData);
-    }
-    return null; // Return null if file doesn't exist
+    // Check if file exists asynchronously
+    await fs.access(DB_FILE_PATH, fs.constants.F_OK);
+    const fileData = await fs.readFile(DB_FILE_PATH, 'utf-8');
+    return JSON.parse(fileData);
   } catch (err) {
+    if (err.code === 'ENOENT') {
+      return null; // File does not exist
+    }
     console.error('Error loading data from file:', err);
     return null;
   }
 }
 
 // Function to parse value (handle numbers, strings, JSON)
-function parseValue(str) {
+async function parseValue(str) {
   if (!isNaN(str) && !isNaN(parseFloat(str))) {
     return parseFloat(str);
   }
   try {
+    // Attempt to parse as JSON using worker thread for large payloads
+    if (typeof workerPool !== 'undefined') { // Check if workerPool is available (main thread)
+      const result = await workerPool.runTask({ type: 'json_parse', data: str });
+      if (!result.error) return result;
+    }
+    // Fallback to direct JSON.parse if worker not available or worker failed
     return JSON.parse(str);
   } catch (e) {
     // Not a valid JSON, treat as a string

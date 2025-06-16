@@ -143,7 +143,7 @@ if (isMainThread) {
 
 // Load data from persistent storage on startup
 async function loadData() {
-  const data = loadFromFile();
+  const data = await loadFromFile();
   if (data) {
     try {
       // Restore store data
@@ -220,7 +220,19 @@ async function saveData(force = false) {
     }
     
     // Save to file
-    const result = saveToFile(existingData);
+    let dataToSave = existingData;
+    if (workerPool) {
+      const stringifyResult = await workerPool.runTask({ type: 'json_stringify', data: existingData });
+      if (!stringifyResult.error) {
+        dataToSave = stringifyResult; // The stringified JSON from worker
+      } else {
+        console.warn('Worker stringify failed, falling back to main thread:', stringifyResult.error);
+        dataToSave = JSON.stringify(existingData, null, 2);
+      }
+    } else {
+      dataToSave = JSON.stringify(existingData, null, 2);
+    }
+    const result = await saveToFile(dataToSave);
     
     // Clear pending operations
     pendingWrites.clear();
@@ -500,7 +512,7 @@ async function jsonSetInternal(key, jsonValue, path, fieldValueToSet) {
         }
       }
       // Parse the fieldValueToSet as it comes as a string from the command
-      const parsedFieldValue = parseValue(fieldValueToSet);
+      const parsedFieldValue = await parseValue(fieldValueToSet);
       if (!setValueByPath(jsonObj, path, parsedFieldValue)) {
         const endTime = process.hrtime.bigint();
         const executionTime = Number(endTime - startTime) / 1000;
@@ -684,12 +696,14 @@ async function jsonPrettyInternal(key) {
 
 // Initialize by loading data
 if (isMainThread) {
-  loadData();
+  (async () => {
+  await loadData();
+})();
   
   // Set up periodic saving (every 5 seconds by default)
   setInterval(async () => {
     if (dirtyFlag) {
-      await saveData();
+       await saveData();
     }
   }, saveInterval);
   

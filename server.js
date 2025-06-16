@@ -106,7 +106,7 @@ const server = net.createServer((socket) => {
 });
 
 // Process a command
-function processCommand(commandStr, socket) {
+async function processCommand(commandStr, socket) {
   const parts = commandStr.split(' ');
   const command = parts[0].toUpperCase();
   
@@ -122,7 +122,7 @@ function processCommand(commandStr, socket) {
       }
       
       const key = parts[1];
-      const value = parseValue(parts.slice(2).join(' '));
+      const value = await parseValue(parts.slice(2).join(' '));
       let ttl = null;
       const exIndex = parts.indexOf('EX');
       if (exIndex > 0 && parts.length > exIndex + 1) {
@@ -211,7 +211,7 @@ function processCommand(commandStr, socket) {
       
     case 'SAVE':
       const startTime = process.hrtime.bigint();
-      db.saveData(true).then(success => {
+      const success = await db.saveData(true);
         const endTime = process.hrtime.bigint();
         const executionTime = Number(endTime - startTime) / 1000;
         if (success) {
@@ -219,7 +219,6 @@ function processCommand(commandStr, socket) {
         } else {
           socket.write(`-ERR failed to save data (${executionTime.toFixed(2)} μs)\n`);
         }
-      });
       break;
       
     case 'STATS':
