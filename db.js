@@ -8,34 +8,105 @@ class LRUCache {
   constructor(maxSize = 10000) {
     this.cache = new Map();
     this.maxSize = maxSize;
+    this.head = null;
+    this.tail = null;
+    this._currentSize = 0;
+    this.maxEntrySize = 1024 * 1024; // 1MB per entry
   }
-  
-  get(key) {
-    if (!this.cache.has(key)) return null;
-    
-    // Get the value and refresh its position in the cache
-    const value = this.cache.get(key);
-    this.cache.delete(key);
-    this.cache.set(key, value);
-    return value;
-  }
-  
-  set(key, value) {
-    // If key exists, refresh its position
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } 
-    // If cache is full, remove the oldest item (first item in the map)
-    else if (this.cache.size >= this.maxSize) {
-      const oldestKey = this.cache.keys().next().value;
-      this.cache.delete(oldestKey);
+
+  // Node class for doubly linked list
+  #Node = class {
+    constructor(key, value) {
+      this.key = key;
+      this.value = value;
+      this.prev = null;
+      this.next = null;
+      this.size = this.#calculateSize(value);
     }
+
+    #calculateSize(value) {
+      if (typeof value === 'string') return value.length;
+      if (typeof value === 'object') return JSON.stringify(value).length;
+      return 8; // Default size for numbers/booleans
+    }
+  }
+
+  #moveToFront(node) {
+    if (node === this.head) return;
     
-    this.cache.set(key, value);
+    // Remove from current position
+    if (node.prev) node.prev.next = node.next;
+    if (node.next) node.next.prev = node.prev;
+    if (node === this.tail) this.tail = node.prev;
+    
+    // Move to front
+    node.next = this.head;
+    node.prev = null;
+    if (this.head) this.head.prev = node;
+    this.head = node;
+    if (!this.tail) this.tail = node;
+  }
+
+  get(key) {
+    const node = this.cache.get(key);
+    if (!node) return null;
+    
+    this.#moveToFront(node);
+    return node.value;
+  }
+
+  set(key, value) {
+    const node = new this.#Node(key, value);
+    
+    // Check if entry is too large
+    if (node.size > this.maxEntrySize) {
+      console.warn(`Entry too large (${node.size} bytes), skipping`);
+      return false;
+    }
+
+    // If key exists, update and move to front
+    if (this.cache.has(key)) {
+      const oldNode = this.cache.get(key);
+      this._currentSize -= oldNode.size;
+      this.#moveToFront(node);
+    } else {
+      // Add to front
+      node.next = this.head;
+      if (this.head) this.head.prev = node;
+      this.head = node;
+      if (!this.tail) this.tail = node;
+    }
+
+    this.cache.set(key, node);
+    this._currentSize += node.size;
+
+    // Evict if necessary
+    while (this._currentSize > this.maxSize && this.tail) {
+      const oldestNode = this.tail;
+      this._currentSize -= oldestNode.size;
+      this.cache.delete(oldestNode.key);
+      
+      this.tail = oldestNode.prev;
+      if (this.tail) this.tail.next = null;
+      if (this.head === oldestNode) this.head = null;
+    }
+
+    return true;
   }
 
   delete(key) {
-    return this.cache.delete(key);
+    const node = this.cache.get(key);
+    if (!node) return false;
+
+    this._currentSize -= node.size;
+    this.cache.delete(key);
+
+    if (node.prev) node.prev.next = node.next;
+    if (node.next) node.next.prev = node.prev;
+    if (node === this.head) this.head = node.next;
+    if (node === this.tail) this.tail = node.prev;
+
+    return true;
   }
 
   has(key) {
@@ -44,15 +115,21 @@ class LRUCache {
 
   clear() {
     this.cache.clear();
+    this.head = null;
+    this.tail = null;
+    this._currentSize = 0;
   }
 
   get size() {
-    return this.cache.size;
+    return this._currentSize;
   }
 
-  // Convert to regular Map for operations that need Map interface
   toMap() {
-    return new Map(this.cache);
+    const map = new Map();
+    for (const [key, node] of this.cache) {
+      map.set(key, node.value);
+    }
+    return map;
   }
 }
 
@@ -74,14 +151,27 @@ class WorkerPool {
     this.workers = [];
     this.taskQueue = [];
     this.numWorkers = numWorkers;
+    this.workerStates = new Map(); // Track worker states
     this.initialize();
   }
 
   initialize() {
     for (let i = 0; i < this.numWorkers; i++) {
       const worker = new Worker(`${__dirname}/worker.js`);
+      const workerId = i;
+      
+      this.workerStates.set(workerId, {
+        busy: false,
+        lastTaskTime: 0,
+        errorCount: 0,
+        restartCount: 0
+      });
       
       worker.on('message', (result) => {
+        const state = this.workerStates.get(workerId);
+        state.busy = false;
+        state.lastTaskTime = Date.now();
+        
         const task = this.taskQueue.shift();
         if (task) {
           task.resolve(result);
@@ -91,38 +181,56 @@ class WorkerPool {
         if (this.taskQueue.length > 0) {
           const nextTask = this.taskQueue[0];
           worker.postMessage(nextTask.data);
+          state.busy = true;
         } else {
-          // No more tasks, worker is idle
           this.workers.push(worker);
         }
       });
       
       worker.on('error', (err) => {
+        const state = this.workerStates.get(workerId);
+        state.errorCount++;
+        
         const task = this.taskQueue.shift();
         if (task) {
           task.reject(err);
         }
         
-        // Replace the crashed worker
-        this.workers = this.workers.filter(w => w !== worker);
-        this.initialize();
+        // Replace the crashed worker if error count is too high
+        if (state.errorCount > 5) {
+          console.warn(`Worker ${workerId} had too many errors, replacing...`);
+          this.workers = this.workers.filter(w => w !== worker);
+          worker.terminate();
+          this.initialize();
+        } else {
+          // Reset worker state
+          state.busy = false;
+          this.workers.push(worker);
+        }
       });
       
       this.workers.push(worker);
     }
   }
 
-  runTask(data) {
+  runTask(data, priority = 0) {
     return new Promise((resolve, reject) => {
-      const task = { data, resolve, reject };
+      const task = { data, resolve, reject, priority, timestamp: Date.now() };
+      
+      // Insert task based on priority
+      const insertIndex = this.taskQueue.findIndex(t => t.priority < priority);
+      if (insertIndex === -1) {
+        this.taskQueue.push(task);
+      } else {
+        this.taskQueue.splice(insertIndex, 0, task);
+      }
       
       if (this.workers.length > 0) {
         const worker = this.workers.pop();
-        this.taskQueue.push(task);
+        const workerId = this.workers.indexOf(worker);
+        const state = this.workerStates.get(workerId);
+        state.busy = true;
         worker.postMessage(data);
-      } else {
-        // All workers are busy, queue the task
-        this.taskQueue.push(task);
       }
     });
   }
@@ -132,6 +240,17 @@ class WorkerPool {
       worker.terminate();
     }
     this.workers = [];
+    this.taskQueue = [];
+    this.workerStates.clear();
+  }
+
+  getStats() {
+    return {
+      totalWorkers: this.numWorkers,
+      activeWorkers: this.workers.length,
+      queuedTasks: this.taskQueue.length,
+      workerStates: Object.fromEntries(this.workerStates)
+    };
   }
 }
 
@@ -494,64 +613,104 @@ function setValueByPath(obj, path, value) {
   return true;
 }
 
-async function jsonSetInternal(key, jsonValue, path, fieldValueToSet) {
-  const startTime = process.hrtime.bigint();
-  try {
-    let finalJsonString;
-    if (path) { // Setting a specific field/path
-      let existingJsonString = store.get(key);
-      let jsonObj = {};
-      if (existingJsonString) {
-        try {
-          jsonObj = JSON.parse(existingJsonString);
-        } catch (e) {
-          // If existing value is not valid JSON, it's an error to set a path
-          const endTime = process.hrtime.bigint();
-          const executionTime = Number(endTime - startTime) / 1000;
-          return { status: "ERROR", message: `Key '${key}' does not hold a JSON object.`, executionTime };
+// Fast JSON field extractor
+function fastJsonFieldExtractor(jsonStr, targetField) {
+  let i = 0;
+  const len = jsonStr.length;
+  
+  // Skip whitespace
+  while (i < len && /\s/.test(jsonStr[i])) i++;
+  
+  // Must start with {
+  if (jsonStr[i] !== '{') return null;
+  i++;
+  
+  while (i < len) {
+    // Skip whitespace
+    while (i < len && /\s/.test(jsonStr[i])) i++;
+    
+    // Parse field name
+    if (jsonStr[i] !== '"') return null;
+    i++;
+    
+    let fieldStart = i;
+    while (i < len && jsonStr[i] !== '"') i++;
+    const fieldName = jsonStr.slice(fieldStart, i);
+    i++;
+    
+    // Skip whitespace and colon
+    while (i < len && (/\s/.test(jsonStr[i]) || jsonStr[i] === ':')) i++;
+    
+    // If this is our target field, extract its value
+    if (fieldName === targetField) {
+      let valueStart = i;
+      let valueEnd = i;
+      let inString = false;
+      let braceCount = 0;
+      let bracketCount = 0;
+      
+      while (i < len) {
+        const char = jsonStr[i];
+        
+        if (char === '"' && jsonStr[i - 1] !== '\\') {
+          inString = !inString;
+        } else if (!inString) {
+          if (char === '{') braceCount++;
+          else if (char === '}') braceCount--;
+          else if (char === '[') bracketCount++;
+          else if (char === ']') bracketCount--;
+          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
+            valueEnd = i;
+            break;
+          }
+        }
+        
+        if (char === '}' && braceCount === 0 && bracketCount === 0) {
+          valueEnd = i;
+          break;
+        }
+        
+        i++;
+      }
+      
+      if (valueEnd === valueStart) valueEnd = i;
+      return jsonStr.slice(valueStart, valueEnd).trim();
+    }
+    
+    // Skip the value
+    let inString = false;
+    let braceCount = 0;
+    let bracketCount = 0;
+    
+    while (i < len) {
+      const char = jsonStr[i];
+      
+      if (char === '"' && jsonStr[i - 1] !== '\\') {
+        inString = !inString;
+      } else if (!inString) {
+        if (char === '{') braceCount++;
+        else if (char === '}') braceCount--;
+        else if (char === '[') bracketCount++;
+        else if (char === ']') bracketCount--;
+        else if (char === ',' && braceCount === 0 && bracketCount === 0) {
+          i++;
+          break;
         }
       }
-      // Parse the fieldValueToSet as it comes as a string from the command
-      const parsedFieldValue = await parseValue(fieldValueToSet);
-      if (!setValueByPath(jsonObj, path, parsedFieldValue)) {
-        const endTime = process.hrtime.bigint();
-        const executionTime = Number(endTime - startTime) / 1000;
-        return { status: "ERROR", message: `Invalid path '${path}' or failed to set value.`, executionTime };
+      
+      if (char === '}' && braceCount === 0 && bracketCount === 0) {
+        i++;
+        break;
       }
-      finalJsonString = JSON.stringify(jsonObj);
-    } else { // Setting the entire JSON object (jsonValue is the new JSON string)
-      JSON.parse(jsonValue); // Validate JSON string
-      finalJsonString = jsonValue; // Store as string
+      
+      i++;
     }
-    store.set(key, finalJsonString);
-    pendingWrites.set(key, finalJsonString);
-    dirtyFlag = true;
-
-    // Clear any existing TTL for this key if we're overwriting with JSON
-    if (ttlMap.has(key)) {
-      ttlMap.delete(key);
-      // No need to schedule a timeout for deletion as there's no new TTL
-    }
-
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    return { status: "+OK", executionTime };
-  } catch (e) {
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    let message = "Invalid JSON format or error during set operation.";
-    if (e instanceof SyntaxError && path) {
-        message = `Invalid JSON value provided for path '${path}'.`;
-    } else if (e instanceof SyntaxError) {
-        message = "Invalid JSON format for the whole value.";
-    } else if (path) {
-        message = `Error setting value at path '${path}': ${e.message}`;
-    }
-    return { status: "ERROR", message, executionTime };
   }
+  
+  return null;
 }
 
-async function jsonGetInternal(key, path) { // path replaces fields
+async function jsonGetInternal(key, path) {
   const startTime = process.hrtime.bigint();
   let result = null;
 
@@ -576,21 +735,223 @@ async function jsonGetInternal(key, path) { // path replaces fields
   }
 
   try {
-    const jsonObj = JSON.parse(result);
-    const valueAtPath = getValueByPath(jsonObj, path); // Use new helper
+    // If path is specified, use fast field extractor
+    if (path && path !== '$') {
+      const fieldValue = fastJsonFieldExtractor(result, path);
+      if (fieldValue === null) {
+        const endTime = process.hrtime.bigint();
+        const executionTime = Number(endTime - startTime) / 1000;
+        return { value: null, executionTime };
+      }
+      
+      // Parse the extracted value
+      let parsedValue;
+      if (fieldValue.startsWith('"')) {
+        // Remove quotes for strings
+        parsedValue = fieldValue.slice(1, -1);
+      } else if (fieldValue === 'true') {
+        parsedValue = true;
+      } else if (fieldValue === 'false') {
+        parsedValue = false;
+      } else if (fieldValue === 'null') {
+        parsedValue = null;
+      } else if (!isNaN(fieldValue)) {
+        parsedValue = Number(fieldValue);
+      } else {
+        // For objects/arrays, parse them
+        parsedValue = JSON.parse(fieldValue);
+      }
 
+      const endTime = process.hrtime.bigint();
+      const executionTime = Number(endTime - startTime) / 1000;
+      return { value: parsedValue, executionTime };
+    }
+
+    // For full object retrieval, use regular JSON.parse
+    const jsonObj = JSON.parse(result);
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    // If path is specified and valueAtPath is undefined, it means path not found
-    // If path is not specified (or '$'), valueAtPath is the whole object
-    return { value: valueAtPath, executionTime }; 
+    return { value: jsonObj, executionTime };
 
   } catch (e) {
-    // This catch is for when 'result' is not a valid JSON string.
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    // If JSON.GET is used on a non-JSON value, it should error.
     return { status: "ERROR", message: `Value at key '${key}' is not a JSON object.`, executionTime };
+  }
+}
+
+// Fast JSON field setter
+function fastJsonFieldSetter(jsonStr, targetField, newValue) {
+  let i = 0;
+  const len = jsonStr.length;
+  let result = '';
+  let found = false;
+  
+  // Skip whitespace
+  while (i < len && /\s/.test(jsonStr[i])) {
+    result += jsonStr[i];
+    i++;
+  }
+  
+  // Must start with {
+  if (jsonStr[i] !== '{') return null;
+  result += '{';
+  i++;
+  
+  while (i < len) {
+    // Skip whitespace
+    while (i < len && /\s/.test(jsonStr[i])) {
+      result += jsonStr[i];
+      i++;
+    }
+    
+    // Parse field name
+    if (jsonStr[i] !== '"') return null;
+    result += '"';
+    i++;
+    
+    let fieldStart = i;
+    while (i < len && jsonStr[i] !== '"') i++;
+    const fieldName = jsonStr.slice(fieldStart, i);
+    result += fieldName + '"';
+    i++;
+    
+    // Skip whitespace and colon
+    while (i < len && (/\s/.test(jsonStr[i]) || jsonStr[i] === ':')) {
+      result += jsonStr[i];
+      i++;
+    }
+    
+    // If this is our target field, replace its value
+    if (fieldName === targetField) {
+      found = true;
+      // Add the new value
+      if (typeof newValue === 'string') {
+        result += `"${newValue}"`;
+      } else if (typeof newValue === 'object') {
+        result += JSON.stringify(newValue);
+      } else {
+        result += String(newValue);
+      }
+      
+      // Skip the old value
+      let inString = false;
+      let braceCount = 0;
+      let bracketCount = 0;
+      
+      while (i < len) {
+        const char = jsonStr[i];
+        
+        if (char === '"' && jsonStr[i - 1] !== '\\') {
+          inString = !inString;
+        } else if (!inString) {
+          if (char === '{') braceCount++;
+          else if (char === '}') braceCount--;
+          else if (char === '[') bracketCount++;
+          else if (char === ']') bracketCount--;
+          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
+            result += ',';
+            i++;
+            break;
+          }
+        }
+        
+        if (char === '}' && braceCount === 0 && bracketCount === 0) {
+          result += '}';
+          i++;
+          break;
+        }
+        
+        i++;
+      }
+    } else {
+      // Copy the value as is
+      let inString = false;
+      let braceCount = 0;
+      let bracketCount = 0;
+      let valueStart = i;
+      
+      while (i < len) {
+        const char = jsonStr[i];
+        result += char;
+        
+        if (char === '"' && jsonStr[i - 1] !== '\\') {
+          inString = !inString;
+        } else if (!inString) {
+          if (char === '{') braceCount++;
+          else if (char === '}') braceCount--;
+          else if (char === '[') bracketCount++;
+          else if (char === ']') bracketCount--;
+          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
+            i++;
+            break;
+          }
+        }
+        
+        if (char === '}' && braceCount === 0 && bracketCount === 0) {
+          i++;
+          break;
+        }
+        
+        i++;
+      }
+    }
+  }
+  
+  return found ? result : null;
+}
+
+async function jsonSetInternal(key, jsonValue, path, fieldValueToSet) {
+  const startTime = process.hrtime.bigint();
+  try {
+    let finalJsonString;
+    
+    if (path) { // Setting a specific field/path
+      let existingJsonString = store.get(key);
+      if (!existingJsonString) {
+        existingJsonString = '{}';
+      }
+      
+      // Parse the fieldValueToSet as it comes as a string from the command
+      const parsedFieldValue = await parseValue(fieldValueToSet);
+      
+      // Use fast field setter
+      finalJsonString = fastJsonFieldSetter(existingJsonString, path, parsedFieldValue);
+      if (!finalJsonString) {
+        const endTime = process.hrtime.bigint();
+        const executionTime = Number(endTime - startTime) / 1000;
+        return { status: "ERROR", message: `Invalid path '${path}' or failed to set value.`, executionTime };
+      }
+    } else { // Setting the entire JSON object
+      // Validate JSON string
+      JSON.parse(jsonValue);
+      finalJsonString = jsonValue;
+    }
+    
+    store.set(key, finalJsonString);
+    pendingWrites.set(key, finalJsonString);
+    dirtyFlag = true;
+
+    // Clear any existing TTL for this key if we're overwriting with JSON
+    if (ttlMap.has(key)) {
+      ttlMap.delete(key);
+    }
+
+    const endTime = process.hrtime.bigint();
+    const executionTime = Number(endTime - startTime) / 1000;
+    return { status: "+OK", executionTime };
+  } catch (e) {
+    const endTime = process.hrtime.bigint();
+    const executionTime = Number(endTime - startTime) / 1000;
+    let message = "Invalid JSON format or error during set operation.";
+    if (e instanceof SyntaxError && path) {
+      message = `Invalid JSON value provided for path '${path}'.`;
+    } else if (e instanceof SyntaxError) {
+      message = "Invalid JSON format for the whole value.";
+    } else if (path) {
+      message = `Error setting value at path '${path}': ${e.message}`;
+    }
+    return { status: "ERROR", message, executionTime };
   }
 }
 
@@ -756,7 +1117,8 @@ module.exports = {
   clearCache: clearCacheInternal, // Renamed for external use
   // Expose internal maps for stats
   getStore: () => store.toMap(),
-  getTtlMap: () => new Map(ttlMap)
+  getTtlMap: () => new Map(ttlMap),
+  getWorkerStats: () => workerPool.getStats()
 };
 
 //   _store: store,

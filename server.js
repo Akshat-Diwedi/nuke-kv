@@ -12,12 +12,20 @@ class CommandQueue {
     this.timer = null;
     this.callbacks = new Map();
     this.nextId = 1;
+    this.priorities = new Map();
+    this.stats = {
+      totalProcessed: 0,
+      totalTime: 0,
+      batchesProcessed: 0,
+      lastReset: Date.now()
+    };
   }
 
-  add(command, callback) {
+  add(command, callback, priority = 0) {
     const id = this.nextId++;
     this.queue.push({ id, ...command });
     this.callbacks.set(id, callback);
+    this.priorities.set(id, priority);
     
     // Start timer if this is the first command in the queue
     if (this.queue.length === 1) {
@@ -34,8 +42,17 @@ class CommandQueue {
   async process() {
     if (this.queue.length === 0) return;
     
-    const batch = this.queue;
-    this.queue = [];
+    const startTime = process.hrtime.bigint();
+    
+    // Sort queue by priority
+    this.queue.sort((a, b) => {
+      const priorityA = this.priorities.get(a.id) || 0;
+      const priorityB = this.priorities.get(b.id) || 0;
+      return priorityB - priorityA;
+    });
+    
+    // Take up to maxBatchSize commands
+    const batch = this.queue.splice(0, this.maxBatchSize);
     clearTimeout(this.timer);
     
     try {
@@ -51,8 +68,16 @@ class CommandQueue {
         if (callback) {
           callback(null, { ...result, batchExecutionTime });
           this.callbacks.delete(id);
+          this.priorities.delete(id);
         }
       }
+      
+      // Update stats
+      this.stats.totalProcessed += batch.length;
+      this.stats.batchesProcessed++;
+      const endTime = process.hrtime.bigint();
+      this.stats.totalTime += Number(endTime - startTime) / 1000;
+      
     } catch (error) {
       // Handle errors
       for (const { id } of batch) {
@@ -60,9 +85,39 @@ class CommandQueue {
         if (callback) {
           callback(error);
           this.callbacks.delete(id);
+          this.priorities.delete(id);
         }
       }
     }
+    
+    // Reset stats periodically
+    const now = Date.now();
+    if (now - this.stats.lastReset >= 60000) { // Reset every minute
+      this.stats = {
+        totalProcessed: 0,
+        totalTime: 0,
+        batchesProcessed: 0,
+        lastReset: now
+      };
+    }
+  }
+
+  getStats() {
+    const avgTimePerBatch = this.stats.batchesProcessed > 0 
+      ? this.stats.totalTime / this.stats.batchesProcessed 
+      : 0;
+    
+    const opsPerSecond = this.stats.totalProcessed > 0
+      ? (this.stats.totalProcessed / (this.stats.totalTime / 1000))
+      : 0;
+    
+    return {
+      queueLength: this.queue.length,
+      totalProcessed: this.stats.totalProcessed,
+      batchesProcessed: this.stats.batchesProcessed,
+      avgTimePerBatch: avgTimePerBatch.toFixed(2),
+      opsPerSecond: opsPerSecond.toFixed(2)
+    };
   }
 }
 
