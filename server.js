@@ -347,9 +347,10 @@ async function processCommand(commandStr, socket) {
       socket.write('  CLRCACHE - Clears the in-memory cache\n');
       socket.write('  JSON.SET key {\"json\":\"object\"} - Set key to a JSON object\n');
       socket.write('  JSON.SET key field value - Set a specific field in a JSON object\n');
-      socket.write('  JSON.GET key [IYKYK field1 AND field2 ...] - Get a JSON object or specific fields\n');
+      socket.write('  JSON.GET key [path1 path2 path3 ...] - Get a JSON object or specific field using path\n');
       socket.write('  JSON.PRETTY key - Get a JSON value in a pretty, readable format\n');
       socket.write('  JSON.DEL key [field] - Delete a JSON object or a specific field within it\n');
+      socket.write('  JSON.UPDATE key path1 value1 & path2 value2 ... - Update multiple specific fields within a JSON object\n');
       break;
 
     case 'JSON.SET':
@@ -364,26 +365,31 @@ async function processCommand(commandStr, socket) {
       let valueToSetRaw;
       let valueToSet;
 
-      // Try to parse as: JSON.SET key 'json_string'
-      // The json_string starts at parts[2] and might contain spaces
-      valueToSetRaw = parts.slice(2).join(' ');
-      if (valueToSetRaw.startsWith("'") && valueToSetRaw.endsWith("'")) {
-        valueToSet = valueToSetRaw.substring(1, valueToSetRaw.length - 1);
+      // Determine if it's an entire JSON object or a specific field
+      // Check if the value starts and ends with a single quote for an entire JSON object
+      if (parts[2].startsWith("'") && parts[parts.length - 1].endsWith("'")) {
+        valueToSet = parts.slice(2).join(' ').substring(1, parts.slice(2).join(' ').length - 1);
         // This is JSON.SET key 'json_string'
       } else if (parts.length >= 4) {
-        // Try to parse as: JSON.SET key path 'value_string'
-        // Path is parts[2], value_string starts at parts[3]
+        // This is JSON.SET key path value
         jsonSetPath = parts[2];
         valueToSetRaw = parts.slice(3).join(' ');
+
+        // If the raw value starts and ends with a single quote, unquote it
         if (valueToSetRaw.startsWith("'") && valueToSetRaw.endsWith("'")) {
           valueToSet = valueToSetRaw.substring(1, valueToSetRaw.length - 1);
         } else {
-          socket.write("-ERR value for JSON.SET with path must be a single-quoted string. Usage: JSON.SET key path 'value_string'\n");
-          return;
+          // Otherwise, try to parse it as JSON (number, boolean, null, object, array)
+          // If parsing fails, treat it as a plain string
+          try {
+            valueToSet = JSON.parse(valueToSetRaw);
+          } catch (e) {
+            valueToSet = valueToSetRaw; // Treat as a literal string if not valid JSON
+          }
         }
       } else {
         // Not enough parts for path 'value_string' and not a valid 'json_string' format
-        socket.write("-ERR invalid arguments for 'JSON.SET' command. Value must be a single-quoted string. Usage: JSON.SET key 'json_string' OR JSON.SET key path 'value_string'\n");
+        socket.write("-ERR invalid arguments for 'JSON.SET' command. Value must be a single-quoted string or a valid JSON primitive/object. Usage: JSON.SET key 'json_string' OR JSON.SET key path value\n");
         return;
       }
 
@@ -400,37 +406,42 @@ async function processCommand(commandStr, socket) {
             socket.write(`-ERR ${result && result.message ? result.message : (err ? err.message : 'Error setting JSON')}\n`);
           } else if (result) {
             socket.write(`${result.status} (${result.executionTime.toFixed(2)} μs)\n`);
-          } else {
-            socket.write(`-ERR Unknown error during JSON.SET\n`);
           }
         }
       );
       break;
 
     case 'JSON.GET':
-      // JSON.GET key [path]
-      if (parts.length < 2 || parts.length > 3) {
-        socket.write("-ERR wrong number of arguments for 'JSON.GET' command. Usage: JSON.GET key [path]\n");
+      // JSON.GET key [path1 path2 path3 ...]
+      if (parts.length < 2) {
+        socket.write("-ERR wrong number of arguments for 'JSON.GET' command. Usage: JSON.GET key [path1 path2 path3 ...]\n");
         return;
       }
       const jsonGetKey = parts[1];
-      const getPath = parts.length === 3 ? parts[2] : '$'; // Default path to '$' (root)
+      const getPaths = parts.length > 2 ? parts.slice(2) : ['$']; // Default to root if no paths specified
       
       commandQueue.add(
-        { operation: 'JSON.GET', key: jsonGetKey, value: getPath }, // 'value' carries the path for jsonGetInternal
+        { operation: 'JSON.GET', key: jsonGetKey, value: getPaths }, // 'value' carries the array of paths
         (err, result) => {
           if (err || (result && result.status === 'ERROR')) {
-             socket.write(`-ERR ${result && result.message ? result.message : (err ? err.message : 'Error getting JSON')}\n`);
+            socket.write(`-ERR ${result && result.message ? result.message : (err ? err.message : 'Error getting JSON')}\n`);
           } else if (result) {
             const { value, executionTime } = result;
-            if (value === null || typeof value === 'undefined') { // Check for undefined explicitly for path not found
+            if (value === null || typeof value === 'undefined') {
               socket.write(`(nil) (${executionTime.toFixed(2)} μs)\n`);
             } else {
-              const valueStr = typeof value === 'object' ? JSON.stringify(value) : value.toString();
+              // Check if the result is an object/array that needs JSON.stringify
+              // Or if it's a primitive that can be directly converted to string
+              let valueStr;
+              if (typeof value === 'object') {
+                valueStr = JSON.stringify(value);
+              } else {
+                valueStr = String(value);
+              }
               socket.write(`+${valueStr} (${executionTime.toFixed(2)} μs)\n`);
             }
           } else {
-             socket.write(`-ERR Unknown error during JSON.GET\n`);
+            socket.write(`-ERR Unknown error during JSON.GET\n`);
           }
         }
       );
@@ -470,6 +481,61 @@ async function processCommand(commandStr, socket) {
           } else {
             // JSON.DEL in db.js returns { value: 1 } for success, { value: 0 } for not found/no-op
             socket.write(`:${result.value} (${result.executionTime.toFixed(2)} μs)\n`);
+          }
+        }
+      );
+      break;
+
+    case 'JSON.UPDATE':
+      // JSON.UPDATE key path1 value1 & path2 value2 & ...
+      // Values with spaces or complex JSON must be double-quoted.
+      if (parts.length < 4) {
+        socket.write("-ERR wrong number of arguments for 'JSON.UPDATE' command. Usage: JSON.UPDATE key path1 value1 & path2 value2 ...\n");
+        return;
+      }
+      const jsonUpdateKey = parts[1];
+      const updatePairsRaw = parts.slice(2).join(' ').split(' & '); // Split by " & " (space ampersand space)
+      const updatesMap = {};
+
+      for (const pair of updatePairsRaw) {
+        // Find the first space to split path and value
+        const firstSpaceIndex = pair.indexOf(' ');
+        if (firstSpaceIndex === -1) {
+          socket.write("-ERR Invalid update pair format: '" + pair + "'. Each pair must be 'path value'.\n");
+          return;
+        }
+
+        const path = pair.substring(0, firstSpaceIndex);
+        let valueRaw = pair.substring(firstSpaceIndex + 1).trim();
+
+        // Handle double-quoted values: remove quotes, retain content
+        if (valueRaw.startsWith('"') && valueRaw.endsWith('"') && valueRaw.length > 1) {
+          valueRaw = valueRaw.substring(1, valueRaw.length - 1);
+        }
+        
+        let parsedValue;
+        try {
+          // Attempt to parse as JSON first (for numbers, booleans, null, objects, arrays)
+          parsedValue = JSON.parse(valueRaw);
+        } catch (e) {
+          parsedValue = valueRaw; // Treat as a literal string if not valid JSON
+        }
+        updatesMap[path] = parsedValue;
+      }
+
+      commandQueue.add(
+        {
+          operation: 'JSON.UPDATE',
+          key: jsonUpdateKey,
+          updates: updatesMap // Pass the map of updates
+        },
+        (err, result) => {
+          if (err || (result && result.status === 'ERROR')) {
+            socket.write(`-ERR ${result && result.message ? result.message : (err ? err.message : 'Error updating JSON')}\n`);
+          } else if (result) {
+            socket.write(`${result.status} (${result.executionTime.toFixed(2)} μs)\n`);
+          } else {
+            socket.write(`-ERR Unknown error during JSON.UPDATE\n`);
           }
         }
       );
