@@ -139,7 +139,7 @@ The server supports command pipelining through the `CommandQueue` class in `serv
 
 ## Comparison with Original Version
 
-| Feature | Original Version | Optimized Version |
+| Feature | Original Version ( not in Github ) | Optimized Version |
 |---------|-----------------|-------------------|
 | Operations per second | 30-45 | Up to 852,286 (with batch size 200) |
 | Memory efficiency | Basic | LRU Cache |
