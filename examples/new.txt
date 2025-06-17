@@ -1,1 +1,0 @@
-JSON.SET user:01 '{"name": "akshat", "age": 17, "description": "Founder"}'

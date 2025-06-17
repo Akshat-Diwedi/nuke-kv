@@ -1,13 +1,12 @@
 // db.js
-const { saveToFile, loadFromFile, parseValue } = require('./utils');
+const { saveToFile, loadFromFile, parseValue, MAX_VALUE_SIZE } = require('./utils');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const os = require('os');
 
 
 
 // Constants for file operations
-const DB_FILE = 'nukekv.db';
-const SAVE_INTERVAL = 5000; // 5 seconds
+const SAVE_INTERVAL = 1; // 1 Millisecond delay
 const COMPRESSION_THRESHOLD = 10 * 1024 * 1024; // 10MB
 
 // In-memory cache with LRU functionality
@@ -18,7 +17,7 @@ class LRUCache {
     this.head = null;
     this.tail = null;
     this._currentSize = 0;
-    this.maxEntrySize = 1024 * 1024; // 1MB per entry
+    this.maxEntrySize = MAX_VALUE_SIZE; // Use MAX_VALUE_SIZE from utils.js
   }
 
   // Node class for doubly linked list
@@ -64,6 +63,7 @@ class LRUCache {
 
   set(key, value) {
     const node = new this.#Node(key, value);
+    console.log(`[LRUCache.set] Key: ${key}, Value Type: ${typeof value}, Value Content: ${JSON.stringify(value)}`);
     
     // Check if entry is too large
     if (node.size > this.maxEntrySize) {
@@ -132,11 +132,11 @@ class LRUCache {
   }
 
   toMap() {
-    const map = new Map();
+    const obj = {};
     for (const [key, node] of this.cache) {
-      map.set(key, node.value);
+      obj[key] = node.value;
     }
-    return map;
+    return obj;
   }
 }
 
@@ -149,7 +149,7 @@ let pendingWrites = new Map();
 let pendingDeletes = new Set();
 let lastSaveTime = Date.now();
 let saveInProgress = false;
-let saveInterval = 5000; // 5 seconds between saves
+
 let dirtyFlag = false;
 
 // Worker pool for parallel operations
@@ -252,57 +252,47 @@ class WorkerPool {
   }
 
   getStats() {
+    const activeWorkers = Array.from(this.workerStates.values()).filter(s => s.busy).length;
+    const idleWorkers = this.numWorkers - activeWorkers;
     return {
       totalWorkers: this.numWorkers,
-      activeWorkers: this.workers.length,
-      queuedTasks: this.taskQueue.length,
-      workerStates: Object.fromEntries(this.workerStates)
+      activeWorkers,
+      idleWorkers,
+      queueLength: this.taskQueue.length
     };
   }
 }
 
-// Create worker pool if we're in the main thread
+// Create a worker pool (main thread only)
 let workerPool;
 if (isMainThread) {
   workerPool = new WorkerPool();
 }
 
-// File operations for persistence
-const fs = require('fs').promises;
-const path = require('path');
-
-// Save data to file
-
-
-
-
-// Save data to persistent storage
+// Function to save data to a file
 async function saveData(force = false) {
-  // Don't save if another save is in progress unless forced
-  if (saveInProgress && !force) return false;
-  
-  // Don't save if no changes and not forced
-  if (!dirtyFlag && !force) return true;
-  
+  if (!dirtyFlag && !force) {
+    return false;
+  }
+
+  if (saveInProgress) {
+    return false;
+  }
   saveInProgress = true;
-  
+  dirtyFlag = false;
+
+  const dataToSave = {
+    store: store.toMap(),
+    ttl: Object.fromEntries(ttlMap)
+  };
+
   try {
-    // Prepare data to save
-    const dataToSave = {
-      store: Object.fromEntries(store.toMap()),
-      ttl: Object.fromEntries(ttlMap)
-    };
-    
-    // Save to file
-    const success = await saveToFile(dataToSave);
-    
-    if (success) {
-      dirtyFlag = false;
-      pendingWrites.clear();
-      pendingDeletes.clear();
-    }
-    
-    return success;
+    await saveToFile(dataToSave);
+    console.log(`Data saved to nukekv.db`);
+    dirtyFlag = false;
+    pendingWrites.clear();
+    pendingDeletes.clear();
+    return true;
   } catch (err) {
     console.error('Error saving data:', err);
     return false;
@@ -319,8 +309,25 @@ async function loadData() {
       // Restore store data
       if (data.store) {
         for (const [key, value] of Object.entries(data.store)) {
-          store.set(key, value);
+          console.log(`[loadData] Initial value for key '$${key}': type='${typeof value}', content='${JSON.stringify(value)}'`);
+          // If the loaded value is a string that looks like JSON, parse it back to an object.
+          // This loop handles multiple layers of stringification from previous bugs.
+          let valueToProcess = value;
+          while (typeof valueToProcess === 'string' && valueToProcess.trim().startsWith('{') && valueToProcess.trim().endsWith('}')) {
+            try {
+              valueToProcess = JSON.parse(valueToProcess);
+            } catch (e) {
+              console.warn(`Malformed JSON string detected during deep-parsing for key ${key}:`, e.message);
+              // If parsing fails, break the loop and keep the current valueToProcess (which might still be a string)
+              break;
+            }
+          }
+          console.log(`[loadData] Final value for key '$${key}': type='${typeof valueToProcess}', content='${JSON.stringify(valueToProcess)}'`);
+          store.set(key, valueToProcess); // Store the final, hopefully parsed, object
         }
+      } else {
+        // Initialize store if no data or empty
+        store = new LRUCache(1000000); // Re-initialize with default size
       }
       
       // Restore TTL data
@@ -338,18 +345,28 @@ async function loadData() {
             store.delete(key);
           }
         }
+      } else {
+        // Initialize ttlMap if no data or empty
+        ttlMap = new Map();
       }
       console.log('Data loaded from persistent storage');
     } catch (err) {
       console.error('Error restoring data:', err);
+      // If parsing fails, initialize with empty state to prevent further errors
+      store = new LRUCache(1000000);
+      ttlMap = new Map();
     }
+  } else {
+    console.log('No existing database file found or file is empty. Starting with an empty database.');
+    store = new LRUCache(1000000);
+    ttlMap = new Map();
   }
 }
 
 // Initialize by loading data
 if (isMainThread) {
   (async () => {
-    await loadData();
+    // loadData() is now called from server.js with DB_FILE_PATH
   })();
   
   // Set up periodic saving
@@ -357,22 +374,10 @@ if (isMainThread) {
     if (dirtyFlag) {
       await saveData();
     }
-  }, 5000); // Save every 5 seconds if there are changes
+  }, SAVE_INTERVAL); // Save every 5 seconds if there are changes
   
-  // Save data on process exit
-  process.on('SIGINT', async () => {
-    console.log('Saving data before exit...');
-    await saveData(true);
-    if (workerPool) workerPool.terminate();
-    process.exit();
-  });
-  
-  process.on('SIGTERM', async () => {
-    console.log('Saving data before exit...');
-    await saveData(true);
-    if (workerPool) workerPool.terminate();
-    process.exit();
-  });
+  // process.on('SIGINT') and process.on('SIGTERM') are handled in server.js for graceful shutdown
+  // Removed here to avoid duplicate handling
 }
 
 // Batch processing function for multiple commands
@@ -398,25 +403,27 @@ async function processBatch(commands) {
         result = await ttlInternal(key);
         break;
       case 'JSON.SET':
-        result = await jsonSetInternal(key, value, cmd.path, cmd.fieldValue);
+        // The `value` for JSON.SET is the full JSON object (parsed to JS object by server.js)
+        // `cmd.path` is for JSON.SET_FIELD, `cmd.fieldValue` is the value for that field.
+        result = await jsonSetInternal(key, value, cmd.field, cmd.value, ttl); // Pass ttl here
+        break;
+      case 'JSON.SET_FIELD': // Explicitly handle JSON.SET_FIELD
+        result = await jsonSetInternal(key, null, cmd.field, cmd.value, ttl); // Pass null for fullJsonValue, use field and value, and ttl
         break;
       case 'JSON.GET':
-        result = await jsonGetInternal(key, cmd.value); // 'value' here will be the paths array
+        result = await jsonGetInternal(key, cmd.paths); // 'paths' here will be the paths array
         break;
       case 'JSON.PRETTY':
         result = await jsonPrettyInternal(key);
         break;
-      case 'CLRCACHE':
-        result = await clearCacheInternal();
-        break;
       case 'JSON.DEL':
-        result = await jsonDelInternal(key, value); // 'value' here will be the field to delete
+        result = await jsonDelInternal(key, cmd.field); // 'field' here will be the field to delete
         break; 
       case 'JSON.UPDATE': // Updated case for JSON.UPDATE to accept updatesMap
-        result = await jsonUpdateInternal(key, cmd.updates); // cmd.updates will be the updatesMap
+        result = await jsonUpdateInternal(key, cmd.updates, ttl); // cmd.updates will be the updatesMap, pass ttl
         break;
         default:
-        result = { status: 'ERROR', message: 'Unsupported operation' };
+        result = { status: '-ERR', message: `Unknown command: ${operation}` };
     }
     
     results.push(result);
@@ -432,27 +439,45 @@ async function processBatch(commands) {
 async function setInternal(key, value, ttl = null) {
   const startTime = process.hrtime.bigint();
   
-  store.set(key, value);
-  pendingWrites.set(key, value);
-  dirtyFlag = true;
-  
-  if (ttl) {
-    const expireAt = Date.now() + ttl * 1000;
-    ttlMap.set(key, expireAt);
+  try {
+    // For size calculation, if value is an object, stringify it temporarily.
+    // The actual `value` (which can be a JS object or primitive) is stored directly.
+    const valueForSizeCalculation = typeof value === 'object' ? JSON.stringify(value) : value;
     
-    // Set timeout to remove expired key
-    setTimeout(() => {
-      store.delete(key);
+    // Check value size (measure stringified size for objects)
+    const valueSize = Buffer.byteLength(valueForSizeCalculation, 'utf8');
+    if (valueSize > MAX_VALUE_SIZE) {
+      throw new Error(`Value exceeds maximum allowed size of ${MAX_VALUE_SIZE} bytes`);
+    }
+    
+    store.set(key, value); // Store the original value (JS object for JSON, or primitive)
+    pendingWrites.set(key, value); // Store the original value
+    dirtyFlag = true;
+    
+    if (ttl) {
+      const expireAt = Date.now() + ttl * 1000;
+      ttlMap.set(key, expireAt);
+      
+      // Set timeout to remove expired key
+      setTimeout(() => {
+        store.delete(key);
+        ttlMap.delete(key);
+        pendingDeletes.add(key);
+        dirtyFlag = true;
+      }, ttl * 1000);
+    } else { // If no TTL provided, clear any existing TTL
       ttlMap.delete(key);
-      pendingDeletes.add(key);
-      dirtyFlag = true;
-    }, ttl * 1000);
+    }
+    
+    const endTime = process.hrtime.bigint();
+    const executionTime = Number(endTime - startTime) / 1000;
+    
+    return { status: "+OK", executionTime };
+  } catch (err) {
+    const endTime = process.hrtime.bigint();
+    const executionTime = Number(endTime - startTime) / 1000;
+    return { status: "ERROR", message: err.message, executionTime };
   }
-  
-  const endTime = process.hrtime.bigint();
-  const executionTime = Number(endTime - startTime) / 1000;
-  
-  return { status: "+OK", executionTime };
 }
 
 async function getInternal(key) {
@@ -476,6 +501,17 @@ async function getInternal(key) {
   } else {
     // Key might exist without TTL
     result = store.get(key);
+  }
+
+  // If the result is a string and looks like JSON, attempt to parse it
+  if (typeof result === 'string' && result.trim().startsWith('{') && result.trim().endsWith('}')) {
+    try {
+      result = JSON.parse(result);
+    } catch (e) {
+      // Not valid JSON, return as original string or null if empty/malformed
+      console.warn(`Malformed JSON string retrieved for key ${key} by getInternal:`, e.message);
+      // If parsing fails, decide if it should be returned as raw string or null. For now, keep as string.
+    }
   }
   
   const endTime = process.hrtime.bigint();
@@ -670,112 +706,150 @@ function fastJsonFieldExtractor(jsonStr, targetField) {
           else if (char === '}') braceCount--;
           else if (char === '[') bracketCount++;
           else if (char === ']') bracketCount--;
-          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
-            valueEnd = i;
-            break;
+        }
+        
+        // If we are outside a string and all braces/brackets are closed, we found the end of the value
+        if (!inString && braceCount === 0 && bracketCount === 0 && (char === ',' || char === '}' || char === ']' || i === len - 1)) {
+          valueEnd = i + (char === ',' ? -1 : 0); // Exclude trailing comma
+          // Adjust valueEnd if it's the very last character and not a closing brace/bracket
+          if (i === len - 1 && char !== '}' && char !== ']' && char !== ')') { // check for ')' for function values
+            valueEnd = len;
           }
+          
+          // Trim whitespace from the end of the extracted value string
+          let extractedValue = jsonStr.slice(valueStart, valueEnd + 1).trim();
+
+          // If the extracted value ends with a comma, remove it (it indicates it was followed by another field)
+          if (extractedValue.endsWith(',')) {
+              extractedValue = extractedValue.slice(0, -1);
+          }
+
+          return extractedValue;
         }
-        
-        if (char === '}' && braceCount === 0 && bracketCount === 0) {
-          valueEnd = i;
-          break;
-        }
-        
         i++;
       }
-      
-      if (valueEnd === valueStart) valueEnd = i;
-      return jsonStr.slice(valueStart, valueEnd).trim();
     }
     
-    // Skip the value
-    let inString = false;
-    let braceCount = 0;
-    let bracketCount = 0;
-    
+    // If not target field, skip to the next field or end of object
+    let inValueString = false;
+    let valueBraceCount = 0;
+    let valueBracketCount = 0;
+    let valueColonFound = false;
     while (i < len) {
       const char = jsonStr[i];
+
+      if (!valueColonFound && char === ':') {
+        valueColonFound = true;
+        i++;
+        continue;
+      }
+      if (!valueColonFound) {
+        i++;
+        continue;
+      }
       
       if (char === '"' && jsonStr[i - 1] !== '\\') {
-        inString = !inString;
-      } else if (!inString) {
-        if (char === '{') braceCount++;
-        else if (char === '}') braceCount--;
-        else if (char === '[') bracketCount++;
-        else if (char === ']') bracketCount--;
-        else if (char === ',' && braceCount === 0 && bracketCount === 0) {
-          i++;
-          break;
-        }
+        inValueString = !inValueString;
+      } else if (!inValueString) {
+        if (char === '{') valueBraceCount++;
+        else if (char === '}') valueBraceCount--;
+        else if (char === '[') valueBracketCount++;
+        else if (char === ']') valueBracketCount--;
       }
       
-      if (char === '}' && braceCount === 0 && bracketCount === 0) {
-        i++;
-        break;
+      if (!inValueString && valueBraceCount === 0 && valueBracketCount === 0 && (char === ',' || char === '}' || i === len - 1)) {
+        // Add the skipped part to the result
+        result += jsonStr.slice(valueStart, i + 1);
+        i++; // Move past comma or closing brace/bracket
+        break; // Move to next field
       }
-      
       i++;
     }
+    
+    if (i >= len) return null; // End of JSON string
+    i++; // Move past comma
   }
   
   return null;
 }
 
-// Fast JSON field setter
+// Fast JSON field setter (replace value for a specific field)
+// This is an in-memory operation, not directly to disk.
 function fastJsonFieldSetter(jsonStr, targetField, newValue) {
   let i = 0;
   const len = jsonStr.length;
   let result = '';
-  let found = false;
-  
-  // Skip whitespace
+  let foundField = false;
+
+  // Skip whitespace and add to result
   while (i < len && /\s/.test(jsonStr[i])) {
     result += jsonStr[i];
     i++;
   }
   
-  // Must start with {
+  // Must start with { - add to result
   if (jsonStr[i] !== '{') return null;
-  result += '{';
+  result += jsonStr[i];
   i++;
   
   while (i < len) {
-    // Skip whitespace
+    // Skip whitespace and add to result
     while (i < len && /\s/.test(jsonStr[i])) {
       result += jsonStr[i];
       i++;
     }
     
-    // Parse field name
-    if (jsonStr[i] !== '"') return null;
-    result += '"';
+    // Parse field name - add to result
+    if (jsonStr[i] !== '"') {
+        if (!foundField) return null; // Malformed JSON before finding target
+        else break; // End of fields
+    }
+    result += jsonStr[i]; // Add opening quote
     i++;
     
     let fieldStart = i;
-    while (i < len && jsonStr[i] !== '"') i++;
-    const fieldName = jsonStr.slice(fieldStart, i);
-    result += fieldName + '"';
-    i++;
-    
-    // Skip whitespace and colon
-    while (i < len && (/\s/.test(jsonStr[i]) || jsonStr[i] === ':')) {
+    while (i < len && jsonStr[i] !== '"') {
       result += jsonStr[i];
       i++;
     }
+    const fieldName = jsonStr.slice(fieldStart, i);
+    result += jsonStr[i]; // Add closing quote
+    i++;
+    
+    // Skip whitespace and colon - add to result
+    while (i < len && /\s/.test(jsonStr[i])) {
+      result += jsonStr[i];
+      i++;
+    }
+    if (jsonStr[i] !== ':') return null; // Malformed JSON
+    result += jsonStr[i];
+    i++;
     
     // If this is our target field, replace its value
     if (fieldName === targetField) {
-      found = true;
-      // Add the new value
-      if (typeof newValue === 'string') {
-        result += `"${newValue}"`;
-      } else if (typeof newValue === 'object') {
-        result += JSON.stringify(newValue);
-      } else {
-        result += String(newValue);
-      }
+      foundField = true;
       
-      // Skip the old value
+      // Skip whitespace after colon for the value
+      while (i < len && /\s/.test(jsonStr[i])) {
+        result += jsonStr[i];
+        i++;
+      }
+
+      // Add the new value (it might be a string, number, boolean, object, or array)
+      // If it's a string, it must be quoted in the output JSON.
+      // If it's an object/array, it must be stringified.
+      // For simplicity, we'll stringify all primitive newValues that are not already strings.
+      // JSON.stringify handles quoting strings and stringifying objects/arrays.
+      let valueToAdd = newValue;
+      if (typeof newValue !== 'string' && typeof newValue !== 'number' && typeof newValue !== 'boolean' && newValue !== null) {
+          valueToAdd = JSON.stringify(newValue);
+      } else if (typeof newValue === 'string') {
+          // Ensure string values are properly quoted and escaped if they contain quotes
+          valueToAdd = JSON.stringify(newValue);
+      }
+      result += valueToAdd;
+      
+      // Skip the old value in the original jsonStr
       let inString = false;
       let braceCount = 0;
       let bracketCount = 0;
@@ -790,381 +864,289 @@ function fastJsonFieldSetter(jsonStr, targetField, newValue) {
           else if (char === '}') braceCount--;
           else if (char === '[') bracketCount++;
           else if (char === ']') bracketCount--;
-          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
-            result += ',';
-            i++;
-            break;
-          }
         }
         
-        if (char === '}' && braceCount === 0 && bracketCount === 0) {
-          result += '}';
-          i++;
-          break;
+        // If we are outside a string and all braces/brackets are closed, we found the end of the value
+        if (!inString && braceCount === 0 && bracketCount === 0 && (char === ',' || char === '}' || char === ']' || i === len - 1)) {
+          // After skipping the old value, append remaining part of jsonStr
+          result += jsonStr.slice(i);
+          return result;
         }
-        
         i++;
       }
     } else {
-      // Copy the value as is
-      let inString = false;
-      let braceCount = 0;
-      let bracketCount = 0;
-      let valueStart = i;
-      
+      // Not target field, skip its value
+      let inValueString = false;
+      let valueBraceCount = 0;
+      let valueBracketCount = 0;
+      let valueColonFound = false;
       while (i < len) {
         const char = jsonStr[i];
-        result += char;
-        
-        if (char === '"' && jsonStr[i - 1] !== '\\') {
-          inString = !inString;
-        } else if (!inString) {
-          if (char === '{') braceCount++;
-          else if (char === '}') braceCount--;
-          else if (char === '[') bracketCount++;
-          else if (char === ']') bracketCount--;
-          else if (char === ',' && braceCount === 0 && bracketCount === 0) {
-            i++;
-            break;
-          }
-        }
-        
-        if (char === '}' && braceCount === 0 && bracketCount === 0) {
+
+        if (!valueColonFound && char === ':') {
+          valueColonFound = true;
           i++;
-          break;
+          continue;
+        }
+        if (!valueColonFound) {
+          i++;
+          continue;
+        }
+
+        if (char === '"' && jsonStr[i - 1] !== '\\') {
+          inValueString = !inValueString;
+        } else if (!inValueString) {
+          if (char === '{') valueBraceCount++;
+          else if (char === '}') valueBraceCount--;
+          else if (char === '[') valueBracketCount++;
+          else if (char === ']') valueBracketCount--;
         }
         
+        if (!inValueString && valueBraceCount === 0 && valueBracketCount === 0 && (char === ',' || char === '}' || i === len - 1)) {
+          // Add the skipped part to the result
+          result += jsonStr.slice(valueStart, i + 1);
+          i++; // Move past comma or closing brace/bracket
+          break; // Move to next field
+        }
         i++;
       }
     }
   }
-  
-  return found ? result : null;
+
+  // If we reach here, it means we appended everything or something went wrong.
+  // This path should ideally only be taken if the targetField was not found, or it's an empty object.
+  if (!foundField) {
+      // If the field wasn't found, append the closing brace if the original JSON was not empty
+      if (result.trim().endsWith('{')) {
+          // Append the new field if it's a valid scenario (e.g., adding to an empty object)
+          // This is a simplified append. For robustness, check if a comma is needed.
+          result += `"${targetField}":${JSON.stringify(newValue)}`;
+      }
+  }
+  return result; // Or handle error if field not found
 }
 
-async function jsonSetInternal(key, jsonValue, path, fieldValueToSet) {
+// JSON operations
+async function jsonSetInternal(key, jsonValue, path = null, fieldValueToSet = null, ttl = null) {
   const startTime = process.hrtime.bigint();
+
   try {
-    let finalJsonString;
-    
-    if (path) { // Setting a specific field/path
-      let existingJsonString = store.get(key);
-      if (!existingJsonString) {
-        existingJsonString = '{}';
-      }
-      
-      // Parse the existing JSON
-      let jsonObj;
+    // Retrieve the stored value, which could be a string (from old data) or an object (new data)
+    let storedData = store.has(key) ? store.get(key) : null;
+    let currentJson = null;
+
+    if (typeof storedData === 'string' && storedData.trim().startsWith('{')) {
       try {
-        jsonObj = JSON.parse(existingJsonString);
+        currentJson = JSON.parse(storedData);
       } catch (e) {
-        const endTime = process.hrtime.bigint();
-        const executionTime = Number(endTime - startTime) / 1000;
-        return { status: "ERROR", message: "Existing value is not a valid JSON object.", executionTime };
+        console.warn(`Malformed JSON string for key ${key} during jsonSetInternal. Initializing as empty object.`);
+        currentJson = {};
       }
-      
-      // Parse the field value
-      let parsedValue;
-      try {
-        parsedValue = JSON.parse(fieldValueToSet);
-      } catch (e) {
-        // If not valid JSON, treat as string
-        parsedValue = fieldValueToSet;
+    } else if (typeof storedData === 'object' && storedData !== null) {
+      currentJson = storedData;
+    } else if (storedData !== null) {
+      // If storedData is not a string, object, or null (e.g., number, boolean)
+      if (path !== null) {
+        throw new Error(`Value at key ${key} is not a JSON object. Cannot set field.`);
       }
-      
-      // Set the value at the specified path
-      const normalizedPath = path.startsWith('$.') ? path.substring(2) : path;
-      const segments = normalizedPath.split('.');
-      let current = jsonObj;
-      
-      // Navigate to the parent object
-      for (let i = 0; i < segments.length - 1; i++) {
-        const segment = segments[i];
-        if (!(segment in current)) {
-          current[segment] = {};
-        }
-        current = current[segment];
+    }
+
+    if (path === null) { // Setting the whole JSON object
+      if (typeof jsonValue !== 'object' || jsonValue === null) {
+        throw new Error("JSON.SET with no path requires a valid JSON object.");
       }
-      
-      // Set the value at the final segment
-      const lastSegment = segments[segments.length - 1];
-      current[lastSegment] = parsedValue;
-      
-      finalJsonString = JSON.stringify(jsonObj);
-    } else { // Setting the entire JSON object
-      // Validate JSON string
-      JSON.parse(jsonValue);
-      finalJsonString = jsonValue;
+      currentJson = jsonValue; // This is already a JS object from server.js
+    } else { // Setting a field within the JSON object
+      if (currentJson === null) {
+        currentJson = {}; // Initialize empty object if key doesn't exist for field set
+      }
+      // Use setValueByPath to update the nested field
+      const success = setValueByPath(currentJson, path, fieldValueToSet);
+      if (!success) {
+        throw new Error(`Failed to set JSON field at path '${path}'`);
+      }
     }
     
-    store.set(key, finalJsonString);
-    pendingWrites.set(key, finalJsonString);
+    // Check value size (stringified size for objects for measurement)
+    const valueSize = Buffer.byteLength(JSON.stringify(currentJson), 'utf8');
+    if (valueSize > MAX_VALUE_SIZE) {
+      throw new Error(`Value exceeds maximum allowed size of ${MAX_VALUE_SIZE} bytes`);
+    }
+
+    store.set(key, currentJson); // Store the actual JS object
+    pendingWrites.set(key, currentJson); // Store the actual JS object
     dirtyFlag = true;
 
-    // Clear any existing TTL for this key if we're overwriting with JSON
-    if (ttlMap.has(key)) {
+    if (ttl) {
+      const expireAt = Date.now() + ttl * 1000;
+      ttlMap.set(key, expireAt);
+      
+      // Set timeout to remove expired key
+      setTimeout(() => {
+        store.delete(key);
+        ttlMap.delete(key);
+        pendingDeletes.add(key);
+        dirtyFlag = true;
+      }, ttl * 1000);
+    } else { // If no TTL provided, clear any existing TTL
       ttlMap.delete(key);
     }
 
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
+
     return { status: "+OK", executionTime };
-  } catch (e) {
+  } catch (err) {
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    let message = "Invalid JSON format or error during set operation.";
-    if (e instanceof SyntaxError && path) {
-      message = `Invalid JSON value provided for path '${path}'.`;
-    } else if (e instanceof SyntaxError) {
-      message = "Invalid JSON format for the whole value.";
-    } else if (path) {
-      message = `Error setting value at path '${path}': ${e.message}`;
-    }
-    return { status: "ERROR", message, executionTime };
+    return { status: "ERROR", message: err.message, executionTime };
   }
 }
 
+// Helper to get JSON value by path (supports nested paths and arrays)
 async function jsonGetInternal(key, paths) {
   const startTime = process.hrtime.bigint();
-  let result = null;
 
-  // Check TTL and retrieve value from store
-  if (ttlMap.has(key)) {
-    const expireTime = ttlMap.get(key);
-    if (Date.now() > expireTime) {
-      store.delete(key);
-      ttlMap.delete(key);
-      pendingDeletes.add(key);
-      dirtyFlag = true;
-    } else {
-      result = store.get(key);
-    }
-  } else {
-    result = store.get(key);
-  }
-
-  // If key not found or expired
-  if (result === null) {
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    return { value: null, executionTime };
-  }
-
-  try {
-    // Parse the JSON string from the store
-    const jsonObj = JSON.parse(result);
-    
-    // Helper function to safely get a value by a single segment (object key or array index)
-    const getSegmentValue = (obj, segment) => {
-        if (obj === null || typeof obj !== 'object') return undefined; // Cannot traverse if not an object/array
-
-        const arrayMatch = segment.match(/(.*)\[(\d+)\]$/);
-        if (arrayMatch) {
-            const arrayName = arrayMatch[1];
-            const index = parseInt(arrayMatch[2], 10);
-            if (Array.isArray(obj[arrayName])) {
-                return obj[arrayName][index];
-            }
-            return undefined; // Not an array or array not found
-        } else {
-            return obj[segment]; // Direct object property access
-        }
-    };
-
-    // Helper function to traverse a path
-    const traversePath = (obj, pathSegments) => {
-        let current = obj;
-        for (const segment of pathSegments) {
-            current = getSegmentValue(current, segment);
-            if (current === undefined) return undefined; // Path broken
-        }
-        return current;
-    };
-
-    // Case 1: No paths specified or only root path ('$') requested
-    const shouldReturnEntireObject = !paths || paths.length === 0 || (paths.length === 1 && paths[0] === '$');
-    if (shouldReturnEntireObject) {
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { value: jsonObj, executionTime };
-    }
-
-    // Case 2: Single field request
-    if (paths.length === 1) {
-      const path = paths[0];
-      const normalizedPath = path.startsWith('$.') ? path.substring(2) : path; // Remove leading '$' if present
-      // More robust segment splitting for paths like 'address.city' or 'skills[0]'
-      const segments = normalizedPath.match(/[^.\[\]]+|\[\d+\]/g);
-
-      if (!segments) { // Path could not be parsed (e.g., empty string or invalid format)
-          const endTime = process.hrtime.bigint();
-          const executionTime = Number(endTime - startTime) / 1000;
-          return { value: null, executionTime };
+  let value = null;
+  if (store.has(key)) {
+    let storedValue = store.get(key);
+    // If the stored value is a string, attempt to parse it as JSON.
+    // This handles cases where JSON might have been stored as a string by older versions or other means.
+    if (typeof storedValue === 'string') {
+      try {
+        storedValue = JSON.parse(storedValue);
+        // If successfully parsed, update the store with the object for future access
+        store.set(key, storedValue);
+      } catch (e) {
+        // Not a valid JSON string, treat as a regular string value
+        storedValue = null; // Or throw error, depending on desired behavior for malformed JSON strings
       }
-
-      const extractedValue = traversePath(jsonObj, segments);
-
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { value: extractedValue === undefined ? null : extractedValue, executionTime };
     }
 
-    // Case 3: Multiple fields request
-    const resultObj = {};
-    for (const path of paths) {
-      const normalizedPath = path.startsWith('$.') ? path.substring(2) : path;
-      const segments = normalizedPath.match(/[^.\[\]]+|\[\d+\]/g);
-
-      if (!segments) { // Path could not be parsed, mark as null
-          resultObj[path] = null;
-          continue;
+    if (storedValue !== null && typeof storedValue === 'object') {
+      if (paths.length === 0 || paths[0] === '$') {
+        value = storedValue; // Return the whole object if no path or root path specified
+      } else {
+        // Traverse paths to get the value
+        // The paths array might contain multiple segments for a single path like ['user', 'name']
+        // The getValueByPath expects a single path string like "user.name"
+        // So we need to join them if multiple path segments are passed for a single query.
+        // Assuming 'paths' array elements are individual path segments or full paths.
+        // Example: JSON.GET mykey user name -> paths = ['user', 'name']
+        // Example: JSON.GET mykey $.user.name -> paths = ['$.user.name']
+        
+        // If multiple path segments are provided, join them with '.'
+        const fullPath = paths.join('.');
+        value = getValueByPath(storedValue, fullPath);
       }
-
-      const extractedValue = traversePath(jsonObj, segments);
-      resultObj[path] = extractedValue === undefined ? null : extractedValue;
     }
-    
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    return { value: resultObj, executionTime };
-
-  } catch (e) {
-    // Catch any JSON parsing errors or unexpected issues
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    return { status: "ERROR", message: `Value at key '${key}' is not a valid JSON object or an internal error occurred: ${e.message}`, executionTime };
   }
+
+  const endTime = process.hrtime.bigint();
+  const executionTime = Number(endTime - startTime) / 1000;
+  return { value, executionTime };
 }
 
-// Removed unused helper functions (fastJsonFieldExtractor and fastJsonFieldSetter)
-// These were not actively used by the refactored jsonGetInternal and jsonSetInternal
+// Helper to get nested value from JSON (Handles paths like "a.b.c" or "a[0].b")
+const getSegmentValue = (obj, segment) => {
+  if (obj === null || typeof obj === 'undefined') return undefined;
+  if (segment.startsWith('[') && segment.endsWith(']')) {
+    const index = parseInt(segment.substring(1, segment.length - 1));
+    return Array.isArray(obj) ? obj[index] : undefined;
+  } else {
+    return typeof obj === 'object' ? obj[segment] : undefined;
+  }
+};
 
-async function jsonUpdateInternal(key, updatesMap) {
+// Traverse path to get value
+const traversePath = (obj, pathSegments) => {
+  let current = obj;
+  for (const segment of pathSegments) {
+    current = getSegmentValue(current, segment);
+    if (current === undefined) break;
+  }
+  return current;
+};
+
+// JSON.UPDATE operation (updates multiple fields in a JSON object)
+async function jsonUpdateInternal(key, updatesMap, ttl = null) {
   const startTime = process.hrtime.bigint();
+
   try {
-    let existingJsonString = store.get(key);
-    if (existingJsonString === null) {
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { status: "ERROR", message: `Key '${key}' does not exist. Use JSON.SET to create it.`, executionTime };
+    // Retrieve the stored value, which could be a string (from old data) or an object (new data)
+    let storedData = store.has(key) ? store.get(key) : null;
+    let currentJson = null;
+
+    if (typeof storedData === 'string' && storedData.trim().startsWith('{')) {
+      try {
+        currentJson = JSON.parse(storedData);
+      } catch (e) {
+        console.warn(`Malformed JSON string for key ${key} during jsonUpdateInternal. Cannot update.`);
+        throw new Error(`Value at key ${key} is malformed JSON. Cannot update fields.`);
+      }
+    } else if (typeof storedData === 'object' && storedData !== null) {
+      currentJson = storedData;
+    } else if (storedData === null) {
+      throw new Error(`Key ${key} does not exist for JSON.UPDATE.`);
+    } else {
+      throw new Error(`Value at key ${key} is not a JSON object. Cannot update fields.`);
     }
-    
-    let jsonObj;
-    try {
-      jsonObj = JSON.parse(existingJsonString);
-    } catch (e) {
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { status: "ERROR", message: "Existing value is not a valid JSON object.", executionTime };
-    }
-    
+
+    let updatedCount = 0;
     for (const path in updatesMap) {
-      if (!Object.prototype.hasOwnProperty.call(updatesMap, path)) continue;
-
-      const fieldValueToSet = updatesMap[path];
-
-      let parsedFieldValue = fieldValueToSet; // fieldValueToSet already parsed in server.js
-      
-      const normalizedPath = path.startsWith('$.') ? path.substring(2) : path;
-      const segments = normalizedPath.match(/[^.[\]]+|\[\d+\]/g);
-
-      if (!segments || segments.length === 0) {
-        // Log or handle invalid path, but continue with other updates
-        console.warn(`db.js: jsonUpdateInternal - Invalid path in updatesMap: '${path}' for key '${key}'`);
-        continue;
-      }
-
-      let current = jsonObj;
-      let parent = null;
-      let lastSegment = null;
-
-      for (let i = 0; i < segments.length; i++) {
-          const segment = segments[i];
-          const arrayMatch = segment.match(/(.*)\[(\d+)\]$/);
-
-          if (i < segments.length - 1) { // Not the last segment, traverse further
-              if (arrayMatch) {
-                  const arrayName = arrayMatch[1];
-                  const index = parseInt(arrayMatch[2], 10);
-                  if (current === null || typeof current !== 'object' || !Array.isArray(current[arrayName])) {
-                      if (current === null || typeof current !== 'object') {
-                          console.error(`db.js: jsonUpdateInternal - Cannot traverse path '${path}': intermediate '${segment}' is not an object or array. Skipping this update.`);
-                          current = null; // Mark path as broken
-                          break;
-                      }
-                      current[arrayName] = []; 
-                  }
-                  parent = current[arrayName];
-                  lastSegment = index;
-                  current = current[arrayName][index];
-              } else {
-                  if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, segment) || typeof current[segment] !== 'object' || current[segment] === null) {
-                      if (current === null || typeof current !== 'object') {
-                           console.error(`db.js: jsonUpdateInternal - Cannot traverse path '${path}': intermediate '${segment}' is not an object or array. Skipping this update.`);
-                           current = null; // Mark path as broken
-                           break;
-                      }
-                      current[segment] = {}; 
-                  }
-                  parent = current;
-                  lastSegment = segment;
-                  current = current[segment];
-              }
-          } else { // Last segment, where the value will be set
-              if (arrayMatch) {
-                  const arrayName = arrayMatch[1];
-                  const index = parseInt(arrayMatch[2], 10);
-                  if (current === null || typeof current !== 'object' || !Array.isArray(current[arrayName])) {
-                      if (current === null || typeof current !== 'object') {
-                          console.error(`db.js: jsonUpdateInternal - Cannot update path '${path}': target parent is not an object or array. Skipping this update.`);
-                          current = null; // Mark path as broken
-                          break;
-                      }
-                      current[arrayName] = []; 
-                  }
-                  parent = current[arrayName];
-                  lastSegment = index;
-              } else {
-                  parent = current;
-                  lastSegment = segment;
-              }
-          }
-      }
-      
-      if (parent !== null && current !== null) { // Only update if path traversal was successful
-        parent[lastSegment] = parsedFieldValue;
-      } else if (path === '$') { // Special handling for root update, though JSON.UPDATE usually for fields
-         // This case handles updating the root of the object if path was empty or only '$'
-         // For JSON.UPDATE, path should always specify a field, but keeping this for robustness if a malformed path comes through
-         if (typeof parsedFieldValue === 'object' && parsedFieldValue !== null) {
-            // Clear existing and assign new properties for root update
-            Object.keys(jsonObj).forEach(key => delete jsonObj[key]);
-            Object.assign(jsonObj, parsedFieldValue);
-         } else {
-            console.error(`db.js: jsonUpdateInternal - Invalid value type for root update: '${path}'. Skipping this update.`);
-         }
-      } else {
-          console.error(`db.js: jsonUpdateInternal - Skipping update for path '${path}' due to invalid traversal.`);
+      if (Object.prototype.hasOwnProperty.call(updatesMap, path)) {
+        const valueToSet = updatesMap[path];
+        // setValueByPath updates the currentJson object directly
+        const success = setValueByPath(currentJson, path, valueToSet);
+        if (success) {
+          updatedCount++;
+        } else {
+          console.warn(`Failed to update path '${path}' for key ${key}.`);
+        }
       }
     }
-    
-    const finalJsonString = JSON.stringify(jsonObj);
-    
-    store.set(key, finalJsonString);
-    pendingWrites.set(key, finalJsonString);
+
+    if (updatedCount === 0) {
+      return { status: "+OK (no fields updated)", executionTime: Number(process.hrtime.bigint() - startTime) / 1000 };
+    }
+
+    // Check value size (stringified size for objects)
+    const valueSize = Buffer.byteLength(JSON.stringify(currentJson), 'utf8');
+    if (valueSize > MAX_VALUE_SIZE) {
+      throw new Error(`Value exceeds maximum allowed size of ${MAX_VALUE_SIZE} bytes after update`);
+    }
+
+    store.set(key, currentJson); // Store the actual JS object
+    pendingWrites.set(key, currentJson); // Store the actual JS object
     dirtyFlag = true;
 
+    if (ttl) {
+      const expireAt = Date.now() + ttl * 1000;
+      ttlMap.set(key, expireAt);
+      
+      // Set timeout to remove expired key
+      setTimeout(() => {
+        store.delete(key);
+        ttlMap.delete(key);
+        pendingDeletes.add(key);
+        dirtyFlag = true;
+      }, ttl * 1000);
+    } else { // If no TTL provided, clear any existing TTL
+      ttlMap.delete(key);
+    }
+
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    return { status: "+OK", executionTime };
-  } catch (e) {
+
+    return { status: `+OK (${updatedCount} fields updated)`, executionTime };
+  } catch (err) {
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    return { status: "ERROR", message: `Error during JSON.UPDATE operation for key '${key}': ${e.message}`, executionTime };
+    return { status: "ERROR", message: err.message, executionTime };
   }
 }
 
-// Public API functions
+// Exported functions (main thread only)
 async function set(key, value, ttl = null) {
   return setInternal(key, value, ttl);
 }
@@ -1183,125 +1165,126 @@ async function ttlFunc(key) {
 
 async function jsonDelInternal(key, field = null) {
   const startTime = process.hrtime.bigint();
+  
   try {
-    const existingJsonString = store.get(key);
-    if (existingJsonString === null) {
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { value: 0, executionTime }; // Key not found
+    if (!store.has(key)) {
+      return { value: 0, executionTime: Number(process.hrtime.bigint() - startTime) / 1000 };
     }
 
-    if (field) {
-      // Delete a specific field
-      let jsonObj;
-      try {
-        jsonObj = JSON.parse(existingJsonString);
-      } catch (e) {
-        const endTime = process.hrtime.bigint();
-        const executionTime = Number(endTime - startTime) / 1000;
-        return { status: "ERROR", message: "Value at key is not valid JSON", executionTime };
-      }
+    let currentJson = store.get(key);
+    if (typeof currentJson !== 'object' || currentJson === null) {
+      throw new Error(`Value at key ${key} is not a JSON object. Cannot delete field.`);
+    }
 
-      if (Object.prototype.hasOwnProperty.call(jsonObj, field)) {
-        delete jsonObj[field];
-        const newJsonString = JSON.stringify(jsonObj);
-        store.set(key, newJsonString);
-        pendingWrites.set(key, newJsonString);
-        dirtyFlag = true;
-        const endTime = process.hrtime.bigint();
-        const executionTime = Number(endTime - startTime) / 1000;
-        return { value: 1, executionTime }; // Field deleted
-      } else {
-        const endTime = process.hrtime.bigint();
-        const executionTime = Number(endTime - startTime) / 1000;
-        return { value: 0, executionTime }; // Field not found
-      }
-    } else {
-      // Delete the entire JSON object (equivalent to DEL key)
+    let deletedCount = 0;
+    if (field === null) {
+      // Delete the entire JSON object
       ttlMap.delete(key);
       const deleted = store.delete(key);
       if (deleted) {
         pendingDeletes.add(key);
         dirtyFlag = true;
+        deletedCount = 1;
       }
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { value: deleted ? 1 : 0, executionTime };
+    } else {
+      // Delete a specific field or element at a path
+      // setValueByPath can be used with `undefined` to delete a property if it exists directly
+      // For array elements, we might need a specific array modification function.
+      // For now, let's directly manipulate the object for simplicity.
+      const segments = field.startsWith('$.') ? field.substring(2).match(/[^\.[\]]+|\[\d+\]/g) : field.match(/[^\.[\]]+|\[\d+\]/g);
+      
+      if (!segments) throw new Error("Invalid JSON path for deletion.");
+
+      let target = currentJson;
+      for (let i = 0; i < segments.length - 1; i++) {
+        const segment = segments[i];
+        if (segment.startsWith('[') && segment.endsWith(']')) {
+          const index = parseInt(segment.substring(1, segment.length - 1));
+          target = Array.isArray(target) ? target[index] : undefined;
+        } else {
+          target = typeof target === 'object' ? target[segment] : undefined;
+        }
+        if (target === undefined || target === null) break; // Path not found
+      }
+
+      const lastSegment = segments[segments.length - 1];
+      if (target && typeof target === 'object') {
+        if (lastSegment.startsWith('[') && lastSegment.endsWith(']')) {
+          const index = parseInt(lastSegment.substring(1, lastSegment.length - 1));
+          if (Array.isArray(target) && index >= 0 && index < target.length) {
+            target.splice(index, 1);
+            deletedCount = 1;
+          }
+        } else {
+          if (Object.prototype.hasOwnProperty.call(target, lastSegment)) {
+            delete target[lastSegment];
+            deletedCount = 1;
+          }
+        }
+      }
+
+      if (deletedCount > 0) {
+        // If a field was deleted, update the store and mark as dirty
+        store.set(key, currentJson);
+        pendingWrites.set(key, currentJson);
+        dirtyFlag = true;
+      }
     }
-  } catch (error) {
-    // This catch block is for unexpected errors during the process, 
-    // not for controlled outcomes like "key not found" or "invalid JSON format"
     const endTime = process.hrtime.bigint();
     const executionTime = Number(endTime - startTime) / 1000;
-    console.error(`Error in jsonDelInternal for key '${key}' and field '${field}':`, error);
-    return { status: "ERROR", message: "An unexpected error occurred during JSON.DEL operation.", executionTime };
+    return { value: deletedCount, executionTime };
+
+  } catch (err) {
+    const endTime = process.hrtime.bigint();
+    const executionTime = Number(endTime - startTime) / 1000;
+    return { status: "ERROR", message: err.message, executionTime };
   }
 }
 
 async function jsonPrettyInternal(key) {
   const startTime = process.hrtime.bigint();
-  try {
-    const jsonString = store.get(key);
-    
-    if (jsonString === null) { // LRUCache.get returns null if key not found
-      const endTime = process.hrtime.bigint();
-      const executionTime = Number(endTime - startTime) / 1000;
-      return { value: null, executionTime }; // Key not found
+
+  let value = null;
+  if (store.has(key)) {
+    let storedValue = store.get(key);
+    if (typeof storedValue === 'string') {
+      try {
+        storedValue = JSON.parse(storedValue);
+        store.set(key, storedValue);
+      } catch (e) {
+        throw new Error(`Value at key ${key} is not a valid JSON string: ${e.message}`);
+      }
     }
-    
-    // Ensure it's a valid JSON string before pretty printing
-    const jsonObj = JSON.parse(jsonString);
-    const prettyJsonString = JSON.stringify(jsonObj, null, 2); // 2 spaces for indentation
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    return { value: prettyJsonString, executionTime };
 
-  } catch (error) {
-    const endTime = process.hrtime.bigint();
-    const executionTime = Number(endTime - startTime) / 1000;
-    // console.error(`Error in jsonPrettyInternal for key '${key}':`, error); // Avoid excessive logging for common cases like non-JSON value
-    return { status: "ERROR", message: "Value is not a valid JSON object or an error occurred during formatting.", executionTime };
+    if (typeof storedValue === 'object' && storedValue !== null) {
+      value = storedValue;
+    } else {
+      throw new Error(`Value at key ${key} is not a JSON object.`);
+    }
+  } else {
+    value = null; // Key not found
   }
-}
-
-/**
- * Clears the in-memory cache and marks data as dirty for persistence.
- * @returns {object} - Status of the operation.
- */
-function clearCacheInternal() {
-  const startTime = process.hrtime.bigint();
-  store.clear();
-  ttlMap.clear();
-  pendingWrites.clear();
-  pendingDeletes.clear();
-  dirtyFlag = true;
+  
   const endTime = process.hrtime.bigint();
   const executionTime = Number(endTime - startTime) / 1000;
-  return { status: '+OK', message: 'Cache cleared', executionTime };
+  return { value, executionTime };
 }
 
-
+  
 // Export the functions and also expose the internal maps for stats
 module.exports = {
-  set,
-  get,
-  del,
-  ttl: ttlFunc,
+  _store: store,
+  _ttlMap: ttlMap,
   saveData,
   loadData,
   processBatch,
+  set: setInternal,
+  get: getInternal,
+  del: delInternal,
+  ttl: ttlInternal,
   jsonSet: jsonSetInternal,
   jsonGet: jsonGetInternal,
-  jsonDel: jsonDelInternal,
   jsonPretty: jsonPrettyInternal,
-  jsonUpdate: jsonUpdateInternal,
-  clearCache: clearCacheInternal, // Renamed for external use
-  // Expose internal maps for stats
-  getStore: () => store.toMap(),
-  getTtlMap: () => new Map(ttlMap),
-  getWorkerStats: () => workerPool.getStats()
+  jsonDel: jsonDelInternal,
+  jsonUpdate: jsonUpdateInternal
 };
-
-//   _store: store,
-//   _ttlMap: ttlMap
-// };

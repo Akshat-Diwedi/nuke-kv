@@ -13,41 +13,41 @@ PING
 
 **Output:**
 ```
-+PONG
+PONG
 ```
 
 **Example:**
 ```
 > PING
-+PONG
+PONG
 ```
 
 ## SET
 
-Sets the string value of a key. Optionally, an expiration time (TTL) in seconds can be provided.
+Sets the string value of a key. The value **must** be enclosed in double quotes (e.g., "hello world"). Optionally, an expiration time (TTL) in seconds can be provided.
 
 **Syntax:**
 ```
-SET <key> <value> [EX <seconds>]
+SET <key> "<value>" [EX <seconds>]
 ```
 
 - `<key>`: The key to set.
-- `<value>`: The value to set for the key. If the value contains spaces, it should be enclosed in quotes (e.g., "hello world").
+- `"<value>"`: The value to set for the key. This **must** be enclosed in double quotes.
 - `EX <seconds>`: (Optional) Sets an expiration time in seconds.
 
 **Output:**
-- `OK (<execution_time> μs)`: If the key was set successfully.
+- `OK` or `OK (<execution_time> μs)`: If the key was set successfully. Execution time is shown if DEBUG is true.
 - `-ERR <error_message>`: If an error occurred.
 
 **Examples:**
 ```
-> SET mykey myvalue
+> SET mykey "myvalue"
 OK (XX.XX μs)
 
 > SET anotherkey "hello world with spaces"
 OK (XX.XX μs)
 
-> SET tempkey transient EX 60
+> SET tempkey "transient" EX 60
 OK (XX.XX μs)
 ```
 
@@ -63,14 +63,14 @@ GET <key>
 - `<key>`: The key whose value to retrieve.
 
 **Output:**
-- `+<value> (<execution_time> μs)`: If the key exists and has a value.
-- `$-1 (<execution_time> μs)`: If the key does not exist or has expired.
+- `<value>` or `<value> (<execution_time> μs)`: If the key exists and has a value. Execution time is shown if DEBUG is true.
+- `$-1` or `$-1 (<execution_time> μs)`: If the key does not exist or has expired. Execution time is shown if DEBUG is true.
 - `-ERR <error_message>`: If an error occurred.
 
 **Examples:**
 ```
 > GET mykey
-+myvalue (XX.XX μs)
+myvalue (XX.XX μs)
 
 > GET non_existent_key
 $-1 (XX.XX μs)
@@ -88,7 +88,7 @@ DEL <key>
 - `<key>`: The key to delete.
 
 **Output:**
-- `:<integer> (<execution_time> μs)`: The number of keys that were removed (0 or 1 in the current implementation which only supports single key deletion per DEL command).
+- `:<integer>` or `:<integer> (<execution_time> μs)`: The number of keys that were removed (0 or 1 in the current implementation which only supports single key deletion per DEL command). Execution time is shown if DEBUG is true.
 - `-ERR <error_message>`: If an error occurred.
 
 **Example:**
@@ -112,20 +112,20 @@ TTL <key>
 - `<key>`: The key to check.
 
 **Output:**
-- `:<integer> (<execution_time> μs)`: The remaining time to live in seconds.
-- `:-1 (<execution_time> μs)`: If the key exists but has no associated expiration.
-- `:-2 (<execution_time> μs)`: If the key does not exist or has expired.
+- `:<integer>` or `:<integer> (<execution_time> μs)`: The remaining time to live in seconds. Execution time is shown if DEBUG is true.
+- `:-1` or `:-1 (<execution_time> μs)`: If the key exists but has no associated expiration. Execution time is shown if DEBUG is true.
+- `:-2` or `:-2 (<execution_time> μs)`: If the key does not exist or has expired. Execution time is shown if DEBUG is true.
 - `-ERR <error_message>`: If an error occurred.
 
 **Examples:**
 ```
-> SET tempkey some_value EX 60
+> SET tempkey "some_value" EX 60
 OK (XX.XX μs)
 
 > TTL tempkey
 :59 (XX.XX μs)  // or some value close to 60
 
-> SET persistent_key another_value
+> SET persistent_key "another_value"
 OK (XX.XX μs)
 
 > TTL persistent_key
@@ -145,7 +145,7 @@ SAVE
 ```
 
 **Output:**
-- `OK (<execution_time> μs)`: If the save operation was successful.
+- `OK` or `OK (<execution_time> μs)`: If the save operation was successful. Execution time is shown if DEBUG is true.
 - `-ERR <error_message>`: If an error occurred during saving.
 
 **Example:**
@@ -164,12 +164,12 @@ STATS
 ```
 
 **Output:**
-A string containing various server statistics, such as uptime, memory usage, number of keys, etc. The exact format may vary.
+A string containing various server statistics, such as uptime, memory usage, number of keys, etc. Execution time is shown if DEBUG is true.
 
 **Example:**
 ```
 > STATS
-+<server_statistics_string> (XX.XX μs)
+<server_statistics_string> (XX.XX μs)
 ```
 
 ## HELP
@@ -187,16 +187,16 @@ A multi-line string listing available commands and their syntax.
 **Example:**
 ```
 > HELP
-+Available commands:
- PING
- SET <key> <value> [EX <seconds>]
- GET <key>
- ... (and so on for other commands)
+Available commands:
+  PING
+  SET <key> "<value>" [EX <seconds>]
+  GET <key>
+  ... (and so on for other commands)
 ```
 
 ## QUIT
 
-Closes the connection to the server.
+Closes the connection to the server. The data will be persisted to disk upon graceful shutdown (Ctrl+C).
 
 **Syntax:**
 ```
@@ -205,32 +205,13 @@ QUIT
 
 **Output:**
 ```
-+OK
+BYE
 ```
 
 **Example:**
 ```
 > QUIT
-+OK
-```
-
-## CLRCACHE
-
-Clears the in-memory data cache and related structures (LRU cache, TTL map, pending writes, pending deletes). This command frees up RAM without deleting data permanently stored on disk.
-
-**Syntax:**
-```
-CLRCACHE
-```
-
-**Output:**
-- `OK (Cache cleared in <execution_time> μs)`: If the cache was successfully cleared.
-- `-ERR <error_message>`: If an error occurred.
-
-**Example:**
-```
-> CLRCACHE
-OK (Cache cleared in XX.XX μs)
+BYE
 ```
 
 *Note: `XX.XX` in execution times represents a placeholder for the actual time, which will vary.*
