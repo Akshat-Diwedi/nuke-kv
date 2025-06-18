@@ -413,9 +413,6 @@ async function processBatch(commands) {
       case 'JSON.GET':
         result = await jsonGetInternal(key, cmd.paths); // 'paths' here will be the paths array
         break;
-      case 'JSON.PRETTY':
-        result = await jsonPrettyInternal(key);
-        break;
       case 'JSON.DEL':
         result = await jsonDelInternal(key, cmd.field); // 'field' here will be the field to delete
         break; 
@@ -1241,36 +1238,6 @@ async function jsonDelInternal(key, field = null) {
   }
 }
 
-async function jsonPrettyInternal(key) {
-  const startTime = process.hrtime.bigint();
-
-  let value = null;
-  if (store.has(key)) {
-    let storedValue = store.get(key);
-    if (typeof storedValue === 'string') {
-      try {
-        storedValue = JSON.parse(storedValue);
-        store.set(key, storedValue);
-      } catch (e) {
-        throw new Error(`Value at key ${key} is not a valid JSON string: ${e.message}`);
-      }
-    }
-
-    if (typeof storedValue === 'object' && storedValue !== null) {
-      value = storedValue;
-    } else {
-      throw new Error(`Value at key ${key} is not a JSON object.`);
-    }
-  } else {
-    value = null; // Key not found
-  }
-  
-  const endTime = process.hrtime.bigint();
-  const executionTime = Number(endTime - startTime) / 1000;
-  return { value, executionTime };
-}
-
-  
 // Export the functions and also expose the internal maps for stats
 module.exports = {
   _store: store,
@@ -1284,7 +1251,6 @@ module.exports = {
   ttl: ttlInternal,
   jsonSet: jsonSetInternal,
   jsonGet: jsonGetInternal,
-  jsonPretty: jsonPrettyInternal,
   jsonDel: jsonDelInternal,
   jsonUpdate: jsonUpdateInternal
 };

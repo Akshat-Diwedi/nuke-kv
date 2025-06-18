@@ -118,36 +118,6 @@ $-1
 $-1
 ```
 
-## JSON.PRETTY
-
-Retrieves and pretty-prints a JSON object for readability.
-
-**Syntax:**
-```bash
-JSON.PRETTY key
-```
-
-- `key`: The key of the JSON object to pretty-print.
-
-**Output:**
-- A multi-line, pretty-printed JSON string. Execution time is shown if DEBUG is true.
-- `-ERR <error_message>`: If the key does not exist, or if the value is not a valid JSON object.
-
-**Examples:**
-```bash
-> JSON.PRETTY user:1
-{
-  "name": "John",
-  "age": "31",
-  "address": {
-    "city": "Boston"
-  },
-  "skills": [
-    "Node.js"
-  ]
-}
-```
-
 ## JSON.DEL
 
 Deletes a JSON object or specific fields within it.

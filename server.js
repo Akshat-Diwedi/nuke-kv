@@ -463,7 +463,6 @@ async function processCommand(commandStr, socket) {
       socket.write(`  JSON.SET key json_object [EX seconds] - Set key to a JSON object with optional expiration\n`);
       socket.write('  JSON.SET key field "value" - Set a specific field in a JSON object (value must be double-quoted)\n');
       socket.write('  JSON.GET key [path1 path2 path3 ...] - Get a JSON object or specific field using path (output does not include +)\n');
-      socket.write('  JSON.PRETTY key - Get a JSON value in a pretty, readable format\n');
       socket.write('  JSON.DEL key [field] - Delete a JSON object or a specific field within it\n');
       socket.write('  JSON.UPDATE key path1 "value1" & path2 "value2" ... - Update multiple specific fields within a JSON object (values must be double-quoted)\n');
       break;
@@ -601,43 +600,6 @@ async function processCommand(commandStr, socket) {
         }
       );
       break;
-
-    case 'JSON.PRETTY':
-        if (parts.length !== 2) {
-            socket.write('-ERR wrong number of arguments for JSON.PRETTY command\n');
-            return;
-        }
-        const jsonPrettyKey = parts[1];
-        commandQueue.add(
-            { operation: 'JSON.PRETTY', key: jsonPrettyKey },
-            (err, result) => {
-                if (err) {
-                    socket.write(`-ERR ${err.message}\n`);
-                } else {
-                    const { value, executionTime } = result;
-                    if (value === null) {
-                        if (DEBUG) {
-                            socket.write(`null (${executionTime.toFixed(2)} μs)\n`);
-                        } else {
-                            socket.write(`null\n`);
-                        }
-                    } else {
-                        // Ensure it's an object before pretty printing
-                        if (typeof value === 'object') {
-                            const prettyJson = JSON.stringify(value, null, 2);
-                            if (DEBUG) {
-                                socket.write(`${prettyJson} (${executionTime.toFixed(2)} μs)\n`);
-                            } else {
-                                socket.write(`${prettyJson}\n`);
-                            }
-                        } else {
-                            socket.write(`-ERR value at key ${jsonPrettyKey} is not a JSON object\n`);
-                        }
-                    }
-                }
-            }
-        );
-        break;
 
     case 'JSON.DEL':
         // JSON.DEL key [field]

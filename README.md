@@ -97,19 +97,6 @@ client.send('JSON.GET user:1 name age skills[0]', (response) => {
   # Returns: +{"name":"John","age":31,"address.city":"Boston"}
   ```
 
-- **`JSON.PRETTY key`**: Get pretty-printed JSON
-  ```bash
-  JSON.PRETTY user:1
-  # Returns:
-  # +{
-  #   "name": "John",
-  #   "age": 31,
-  #   "address": {
-  #     "city": "Boston"
-  #   }
-  # }
-  ```
-
 - **`JSON.DEL key [field]`**: Delete JSON object or field
   ```bash
   JSON.DEL user:1 "address.city"
