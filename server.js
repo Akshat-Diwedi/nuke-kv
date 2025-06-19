@@ -1,4 +1,5 @@
 // server.js
+// Let's end NodeJs. Next Update `v2.0-preview` - fully written in C++ - Dropping Tomorrow ☢️
 const net = require('net');
 const db = require('./db');
 const { parseValue, DEBUG, MAX_VALUE_SIZE } = require('./utils');
