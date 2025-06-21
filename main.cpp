@@ -33,7 +33,8 @@
 #endif
 
 // --- Type Aliases ---
-using json = nlohmann::json;
+// FIX: Use ordered_json to preserve key insertion order
+using json = nlohmann::ordered_json;
 using high_res_clock = std::chrono::high_resolution_clock;
 
 // --- Basic Configuration ---
@@ -46,7 +47,7 @@ bool CACHING_ENABLED = true;
 bool PIPELINING_ENABLED = true;
 unsigned long long MAX_RAM_GB = 1;
 int WORKERS_THREAD_COUNT = 0;
-std::atomic<int> BATCH_PROCESSING_SIZE = 1;
+std::atomic<int> BATCH_PROCESSING_SIZE = 1000;
 
 // --- Forward Declarations ---
 class NukeKV;
@@ -141,9 +142,11 @@ private:
         if (!PERSISTENCE_ENABLED) return;
         json db_json; db_json["store"] = kv_store_; db_json["ttl"] = ttl_map_;
         std::ofstream db_file(filename);
-        if (db_file.is_open()) db_file << db_json.dump();
+        if (db_file.is_open()) {
+            db_file << db_json.dump(4);
+        }
         if (filename == DATABASE_FILENAME) {
-            dirty_operations_ = 0; // Reset counter AFTER save
+            dirty_operations_ = 0;
         }
     }
     
@@ -169,13 +172,11 @@ private:
                 if (DEBUG_MODE) std::cout << "\n[BG] Expired " << expired_keys.size() << " key(s).\n> " << std::flush;
             }
             
-            // --- FIX: Correct Batch Saving Logic ---
             int batch_size = BATCH_PROCESSING_SIZE.load();
             if (batch_size > 0 && dirty_operations_ >= batch_size) {
-                int ops_to_save = dirty_operations_.load(); // Capture value BEFORE it's reset
+                int ops_to_save = dirty_operations_.load();
                 _save_to_file_unlocked(DATABASE_FILENAME);
                 if (DEBUG_MODE) {
-                    // Use the captured value for accurate logging
                     std::cout << "\n[BG] Batch saved " << ops_to_save << " operations to disk.\n> " << std::flush;
                 }
             }
@@ -453,9 +454,9 @@ STRING COMMANDS:
   DECR key [amount]            - Decrements a numeric key by 1 or by a given amount.
 
 JSON COMMANDS:
-  JSON.SET key '{"a":1}' [EX s] - Sets a key to a JSON object, with optional expiry.
+  JSON.SET key '{"a":1}' [EX s] - Sets a key to a JSON object (key order is preserved).
   JSON.GET key [path]          - Retrieves the whole JSON or a value at a specific path (e.g., $.a).
-  JSON.UPDATE key field "val"    - Updates a field within a JSON object.
+  JSON.UPDATE key field "val"    - Updates a field within a JSON object (key order is preserved).
   JSON.DEL key                 - Deletes a JSON key (same as DEL).
 
 LIFECYCLE & TTL:
