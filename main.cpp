@@ -47,7 +47,7 @@ bool CACHING_ENABLED = true;
 bool PIPELINING_ENABLED = true;
 unsigned long long MAX_RAM_GB = 1;
 int WORKERS_THREAD_COUNT = 0;
-std::atomic<int> BATCH_PROCESSING_SIZE = 1000;
+std::atomic<int> BATCH_PROCESSING_SIZE = 1;
 
 // --- Forward Declarations ---
 class NukeKV;
