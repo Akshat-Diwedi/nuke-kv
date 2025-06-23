@@ -127,21 +127,29 @@ Keys with TTL: 1
 
 The `STRESS` command benchmarks the core performance of the database.
 
-**Example Command:**
+**Command:**
 ```
-> STRESS 10000
+> STRESS 1000000
 ```
 
-**Example Output:**
+**Output:**
+
 ```
-Stress Test running for 10000 ops...
+Stress Test running for 1000000 ops...
 -------------------------------------------
-SET:      75123.45 ops/sec (133.11ms total)
-UPDATE:   81234.56 ops/sec (123.09ms total)
-GET:     105432.10 ops/sec (94.85ms total)
-DEL:      98765.43 ops/sec (101.25ms total)
+SET:       823534.13 ops/sec (1.214s total)
+UPDATE:   1813144.56 ops/sec (551.53ms total)
+GET:      2361762.58 ops/sec (423.41ms total)
+DEL:      1499790.07 ops/sec (666.76ms total)
 -------------------------------------------
-MAX RAM USAGE: 5.75 MB
+MAX RAM USAGE: 137.66 MB
 -------------------------------------------
-Total Stress Test Time: 452.30ms
+Total Stress Test Time: 2.938s
+
 ``` 
+
+---
+
+**`note` : the above STRESS command's Output is the real benchmark. we ran this test on Google Cloud Compute Engine named as `E2` - specification of this instance is `2 vCPU 1 Core` & `4GB RAM` .**
+
+**The command `STRESS 1000000` states that it will run 1 Million operation for EACH 4 Commands - SET, UPDATE, GET, DEL .**
