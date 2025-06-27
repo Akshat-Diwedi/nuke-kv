@@ -172,15 +172,15 @@ The `STRESS` command benchmarks the core performance of the database without aff
   
 **Example Output:**
 ```
-Stress Test running for 1000000 ops (in-memory only)...
+Stress Test running for 1000000 ops
 -------------------------------------------
-SET:        823534.13 ops/sec (1.214s total)
-UPDATE:    1813144.56 ops/sec (551.53ms total)
-GET:       2361762.58 ops/sec (423.41ms total)
-DEL:       1499790.07 ops/sec (666.76ms total)
+SET:      1262786.67 ops/sec (791.90ms total)
+UPDATE:   2618733.44 ops/sec (381.86ms total)
+GET:      2833786.03 ops/sec (352.88ms total)
+DEL:      1503694.33 ops/sec (665.03ms total)
 -------------------------------------------
-MAX RAM USAGE: 137.66 MB
-Total Stress Test Time: 2.938s
+MAX RAM USAGE: 134.95 MB
+Total Stress Test Time: 2.297s
 ```
 
 ---
