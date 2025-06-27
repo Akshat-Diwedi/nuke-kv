@@ -1,4 +1,4 @@
-const http = require("http");
+const net = require("net");
 const readline = require("readline");
 const { performance } = require("perf_hooks");
 
@@ -7,99 +7,146 @@ const colors = {
   reset: "\x1b[0m",
   lightGreen: "\x1b[92m", // For successful server responses
   lightRed: "\x1b[91m",   // For connection errors
-  cyan: "\x1b[36m",      // For client info messages
-  yellow: "\x1b[93m",     // <-- For latency information
+  cyan: "\x1b[36m",       // For client info messages
+  yellow: "\x1b[93m",     // For latency information
 };
 
 // --- Configuration ---
-const options = {
-  hostname: "localhost", // Use 'localhost' or the server's IP address
+const config = {
+  // host: "localhost", // Use 'localhost' or the server's IP address
   port: 8080,
-  path: "/",
-  method: "POST",
-  headers: {
-    "Content-Type": "text/plain; charset=utf-8",
-  },
 };
 
-// --- Create an interface for reading lines from the console ---
+// Create a TCP socket
+const client = new net.Socket();
+let isConnected = false;
+let responseBuffer = Buffer.alloc(0); // Buffer to assemble incoming data chunks
+let awaitingResponse = false;
+let startTime; // To store the start time for latency measurement
+
+// Create an interface for reading lines from the console
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
-  prompt: `${colors.cyan}>${colors.reset} `,
 });
 
+function setPrompt() {
+    const prompt_char = isConnected ? '>' : '!';
+    rl.setPrompt(`${colors.cyan}${prompt_char}${colors.reset} `);
+    rl.prompt();
+}
+
 /**
- * Sends a command to the NukeKV server and measures latency.
+ * Sends a command to the NukeKV server using the nuke-wire protocol.
+ * The protocol frames messages with an 8-byte length prefix.
  * @param {string} command The command string to send.
  */
 function sendCommand(command) {
   if (!command) {
-    rl.prompt();
+    setPrompt();
+    return;
+  }
+  if (!isConnected) {
+    console.log(`${colors.lightRed}Not connected to the server. Type 'connect' to try again.${colors.reset}`);
+    setPrompt();
+    return;
+  }
+  if (awaitingResponse) {
+    console.log(`${colors.yellow}Waiting for server response, please wait...${colors.reset}`);
     return;
   }
 
-  options.headers["Content-Length"] = Buffer.byteLength(command);
-
-  let startTime; // <-- To store the start time
-
-  const req = http.request(options, (res) => {
-    let responseBody = "";
-    res.setEncoding("utf8");
-
-    res.on("data", (chunk) => {
-      responseBody += chunk;
-    });
-
-    res.on("end", () => {
-      // THE FIX IS HERE: Calculate latency and display it
-      const endTime = performance.now();
-      const latency = (endTime - startTime).toFixed(2); // Calculate and format to 2 decimal places
-
-      const coloredResponse = `${colors.lightGreen}${responseBody}${colors.reset}`;
-      const coloredLatency = `${colors.yellow} (latency: ${latency}ms)${colors.reset}`;
-
-      console.log(coloredResponse + coloredLatency);
-      rl.prompt();
-    });
-  });
-
-  req.on("error", (error) => {
-    const errorMessage = `❌ Connection Error: ${error.message}`;
-    const helpMessage = "Is the server running? Please check and try again.";
-    console.error(
-      `${colors.lightRed}${errorMessage}\n${helpMessage}${colors.reset}`,
-    );
-    rl.prompt();
-  });
-
-  // Record the start time right before sending the request
+  const payload = Buffer.from(command, "utf-8");
+  // Frame the message: 8-byte length header (Big Endian) + payload
+  const header = Buffer.alloc(8);
+  header.writeBigUInt64BE(BigInt(payload.length));
+  
+  const message = Buffer.concat([header, payload]);
+  
+  awaitingResponse = true;
   startTime = performance.now();
-  req.write(command);
-  req.end();
+  client.write(message);
 }
 
-// --- Main Application Logic ---
-console.log(`${colors.cyan}NukeKV Client${colors.reset}`);
-console.log(
-  `Connecting to http://${options.hostname}:${options.port}`,
-);
-console.log(
-  'Type a command and press Enter. Type "exit" or press Ctrl+C to quit.',
-);
+// --- Socket Event Handlers ---
 
-rl.prompt();
+client.on("connect", () => {
+  isConnected = true;
+  console.log(`${colors.cyan}Successfully connected to NukeKV server at ${config.host}:${config.port}${colors.reset}`);
+  console.log('Type a command and press Enter. Type "exit" or press Ctrl+C to quit.');
+  setPrompt();
+});
+
+client.on("data", (chunk) => {
+  responseBuffer = Buffer.concat([responseBuffer, chunk]);
+
+  while (true) {
+    if (responseBuffer.length < 8) {
+      break; 
+    }
+
+    const bodyLength = Number(responseBuffer.readBigUInt64BE(0));
+    const totalMsgLength = 8 + bodyLength;
+
+    if (responseBuffer.length < totalMsgLength) {
+      break; 
+    }
+
+    const responseBody = responseBuffer.subarray(8, totalMsgLength).toString("utf-8");
+    const endTime = performance.now();
+    const latency = (endTime - startTime).toFixed(2);
+    
+    const coloredResponse = `${colors.lightGreen}${responseBody}${colors.reset}`;
+    const coloredLatency = `${colors.yellow} (latency: ${latency}ms)${colors.reset}`;
+    
+    console.log(coloredResponse + coloredLatency);
+
+    responseBuffer = responseBuffer.subarray(totalMsgLength);
+    awaitingResponse = false;
+    setPrompt();
+  }
+});
+
+client.on("close", () => {
+  isConnected = false;
+  awaitingResponse = false;
+  console.log(`\n${colors.lightRed}Connection to server closed.${colors.reset}`);
+  setPrompt();
+});
+
+client.on("error", (err) => {
+  isConnected = false;
+  awaitingResponse = false;
+  console.error(
+    `${colors.lightRed}❌ Connection Error: ${err.message}${colors.reset}`
+  );
+  setPrompt();
+});
+
+// --- Main Application Logic ---
+
+console.log(`${colors.cyan}NukeKV Interactive Client (nuke-wire protocol)${colors.reset}`);
+console.log(`Attempting to connect to ${config.host}:${config.port}...`);
+client.connect(config.port, config.host);
 
 rl.on("line", (line) => {
-  const command = line.trim();
-  if (command.toLowerCase() === "exit") {
-    rl.close();
-  } else {
-    sendCommand(command);
+  const command = line.trim().toLowerCase();
+  switch (command) {
+    case "exit":
+      rl.close();
+      break;
+    case "connect":
+        if (!isConnected) client.connect(config.port, config.host);
+        else console.log(`${colors.cyan}Already connected.${colors.reset}`)
+        break;
+    default:
+      sendCommand(line.trim());
+      break;
   }
 });
 
 rl.on("close", () => {
   console.log(`\n${colors.cyan}Shutting down client. Goodbye!${colors.reset}`);
+  client.end();
   process.exit(0);
 });

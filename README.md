@@ -1,32 +1,34 @@
 ## NukeKV ☢️ - A High-Performance Key-Value Store
 
-Welcome to NukeKV, a lightweight, fast, and persistent key-value database server written in C++. It provides a simple HTTP interface for all operations, making it universally accessible from any programming language or tool.
+Welcome to NukeKV, a lightweight, fast, and persistent key-value database server written in C++. It communicates via a custom, high-performance raw TCP protocol called **`nuke-wire`**, making it an exceptionally low-latency solution. This version includes **Advanced JSON Functionality**, allowing for complex CRUD operations and list manipulations inside your stored data.
 
-**Supports** : Windows , Linux , MacOS .
+**Supports**: Windows, Linux, MacOS.
 
 ### Features
 
-*   **Cross-Platform:** Compiles and runs on Windows, macOS, and Linux.
-*   **Blazing Fast:** Built in C++ with a multi-threaded, asynchronous core.
-*   **Persistent Storage:** Saves your data to a `nukekv.db` file and reloads it on startup.
-*   **Rich Data Types:** Supports standard string values and powerful native JSON objects.
-*   **Dynamic Debugging:** Toggle performance logging on the fly without restarting the server.
-*   **Built-in Diagnostics:** Includes `STATS` for monitoring and `STRESS` for performance benchmarking.
-*   **Zero Dependencies:** The final compiled server runs as a single, portable executable.
+*   **Cross-Platform:** Compiles and runs on Windows, macOS, and Linux.
+*   **Blazing Fast:** Built in C++ with a multi-threaded, asynchronous core. The `nuke-wire` protocol eliminates HTTP overhead for maximum throughput.
+*   **Graceful Restarts:** The server can be immediately restarted without "Bind failed" errors, making it reliable in production and development environments.
+*   **Massive Payload Support:** The `nuke-wire` protocol is engineered to handle individual requests and responses well over 512MB in size.
+*   **Ephemeral Stress Testing:** The `STRESS` command is a pure in-memory benchmark that **does not write to disk** and cleans up after itself perfectly.
+*   **User-Friendly Startup:** Intelligently fetches and displays your public IP for easy client configuration.
+*   **Human-Readable Persistence:** Saves data to a formatted `nukekv.db` file and reloads it on startup.
+*   **Rich Data Types:** Supports standard string values and powerful native JSON objects and arrays.
+*   **Advanced JSON Queries:** Filter, update, search, delete, and append to JSON arrays using intuitive syntax.
+*   **Zero Dependencies:** The final compiled server runs as a single, portable executable.
 
 ---
   
 ### Compiling the code :
 
-- just `fork/clone` the repo first then in your machine's terminal - run the following commands according to your Operating System given below ⬇️ .
+- Just `fork/clone` the repo first then in your machine's terminal - run the following commands according to your Operating System given below ⬇️ .
   
 #### *For windows users :*
 
 ```powershell
-# Install g++ via MSYS2 or another package manager
-# Compile with optimizations
-
-g++ -std=c++17 -O2 -Ilibs -o nukekv-server.exe server.cpp -static -lpthread -lws2_32 -lwsock32
+# Install g++ via MSYS2 or another package manager.
+# The -lpsapi flag is required for memory usage statistics.
+g++ -std=c++17 -O2 -Ilibs -o nukekv-server.exe server.cpp -static -lpthread -lws2_32 -lwsock32 -lpsapi
 
 # Run the server
 .\nukekv-server.exe
@@ -34,25 +36,26 @@ g++ -std=c++17 -O2 -Ilibs -o nukekv-server.exe server.cpp -static -lpthread -lws
 
 #### *For Linux (Ubuntu, Debian, etc.) or macOS Users :*
 
-``` bash
+```bash
 # Install compiler if you don't have it
 # sudo apt-get update && sudo apt-get install -y g++ (On Debian/Ubuntu)
-# xcode-select --install (On macOS)
-# Compile with optimizations
-
 g++ -std=c++17 -O2 -Ilibs -o nukekv-server server.cpp -lpthread
 
 # Run the server
 ./nukekv-server
 ```
 
+### Client ⚡
 
-To view and query your server, we've also provided a [client.js](https://github.com/Akshat-Diwedi/nuke-kv/blob/main/client.js) template. Make sure to update the `public IP and port` according to your environment.
+To connect to and query your server, use the provided `client.js` application. Make sure Node.js is installed. Update the `host` in `client.js` to your server's IP address (the server will display its public IP on startup) and run the client:
 
-To make things easier, when you run the server application, it will display your `Public IP` and `Localhost` address — which you can simply copy and paste into the `client.js` file to ensure the server is connected and ready to run ⚡
-
+```bash
+node client.js
+```
 
 ---
+
+### Command Reference
 
 ### Server & Diagnostics
 
@@ -61,9 +64,9 @@ To make things easier, when you run the server application, it will display your
 | `PING`                | Returns `+PONG`. Useful for checking if the server is responsive.      |
 | `DEBUG <true\|false>` | Enables or disables performance logging for each command.              |
 | `STATS`               | Shows detailed statistics about the server's state and performance.    |
-| `STRESS <count>`      | Runs a benchmark with `<count>` operations for SET, GET, etc.          |
+| `STRESS <count>`      | Runs a benchmark with `<count>` ops. **This is non-persistent and will not affect the database file.** |
+| `CLRDB` | **New!** Deletes all keys and values from the database. |
 | `QUIT`                | Instructs the server to perform a final save and shut down gracefully. |
-  
 
 ### Basic Key-Value Commands
 
@@ -76,104 +79,110 @@ To make things easier, when you run the server application, it will display your
 | `DEL <key> [key2...]` | Deletes one or more keys. Returns the count of deleted keys. |
 | `INCR <key> [amount]` | Increments a numeric key by 1 or by a given `amount`. |
 | `DECR <key> [amount]` | Decrements a numeric key by 1 or by a given `amount`. |
-| `TTL <key>` | Gets the remaining time-to-live of a key in seconds. |
-| `SETTTL <key> <seconds>` | Sets or updates the TTL for an existing key. |
+| `TTL <key>` | Gets the remaining time-to-live of a key in seconds. Returns `-1` if no TTL. |
+| `EXPIRE <key> <seconds>` | Sets or updates the TTL for an existing key. |
+| `SIMILAR <prefix>` | **New!** Returns the number of keys that start with the given prefix. |
 
-  
+---
 
-### JSON Commands
+### Advanced JSON Commands
 
-NukeKV supports storing and manipulating JSON objects directly.
+NukeKV supports storing **any valid JSON**, including arrays of objects, and provides powerful tools to query and manipulate them. Keywords like `WHERE` and `SET` are case-insensitive.
 
 | Command | Description |
 | :--- | :--- |
-| `JSON.SET <key> '<json_string>'` | Sets a key to a JSON object. |
-| `JSON.GET <key>` | Retrieves the entire JSON object as a string. |
-| `JSON.UPDATE <key> <f1> "<v1>" & <f2> "<v2>"` | Updates one or more fields in a JSON object. The `&` is an optional visual separator. |
-| `JSON.DEL <key>` | Deletes a JSON key (same as `DEL`). |
+| `JSON.SET <key> '<json_string>'` | Sets a key to any valid JSON. |
+| `JSON.GET <key>` | Retrieves the entire JSON document, pretty-printed. |
+| `JSON.GET <key> WHERE <field> <value>`| Filters a JSON array, returning only objects where `<field>` equals `<value>`. |
+| `JSON.UPDATE <key> WHERE <f> <v> SET <f1> <v1>...`| Updates one or more fields in objects that match the `WHERE` clause. |
+| `JSON.SEARCH <key> "<term>"`| Performs a text search and returns the first matching object. |
+| `JSON.DEL <key> WHERE <field> <value>` | Deletes objects from a JSON array where `<field>` matches `<value>`. |
+| `JSON.APPEND <key> <f1> <v1> ...` | Appends a new object, built from key-value pairs, to a JSON array. |
 
+#### **Complete JSON Workflow Example**
 
-**Example JSON Workflow:**
+Let's use a product catalog stored in the key `products`.
 
+**1. Set an initial JSON array:**
 ```
-> JSON.SET user:01 '{"name": "Akshat", "role": "founder & ceo"}'
-+OK
-
-> JSON.UPDATE user:01 status "Founder & CEO" & company "Nukeverse"
-+OK
-  
-> JSON.GET user:01
-{
-  "name": "Akshat",
-  "status": "Founder & CEO",
-  "company": "Nukeverse"
-}
+JSON.SET products '[{"id":1,"name":"Smartphone X23","stock":50}]'
 ```
 
-  
-  
+**2. Append a new product to the array:**
+```
+JSON.APPEND products id 2 name "Laptop ProBook" stock 20
+```
 
+**3. Get a specific product using `WHERE`:**
+```
+JSON.GET products WHERE id 2
+```
+
+**4. Update a product's stock using `WHERE` and `SET`:**
+```
+JSON.UPDATE products WHERE name "Laptop ProBook" SET stock 15
+```
+
+**5. Conditionally delete the smartphone from the catalog:**
+```
+JSON.DEL products WHERE id 1
+```
+
+**6. Verify the final state of the catalog:**
+```
+JSON.GET products
+```
+---
+  
 ## Diagnostics Output 🩹✨
 
-  
 ### STATS
 
 The `STATS` command provides a real-time snapshot of the server.
   
 **Example Command:**
-
 ```
 > STATS
 ```
 
-
 **Example Output:**
-
 ```
-Version: NukeKV v1.0-Stable ♾️
+Version: NukeKV v2.0-nukewire ☢️
+Protocol: nuke-wire (raw TCP)
 Debug Mode: ON
 Worker Threads: 7
 Persistence: Enabled
-  - Batch Size: 1
-  - Unsaved Ops: 0
+  - Batch Size: 1
+  - Unsaved Ops: 0
 Caching: Enabled
-  - Memory Limit: 1.00 GB
-  - Memory Used: 123.45 KB
-Total Keys: 5
-Keys with TTL: 1
+  - Memory Limit: Unlimited
+  - Memory Used: 212 B
+Total Keys: 1
+Keys with TTL: 0
 ```
-
-  
 
 ### STRESS
   
-The `STRESS` command benchmarks the core performance of the database.
+The `STRESS` command benchmarks the core performance of the database without affecting saved data.
 
-**Command:**
-
+**Example Command:**
 ```
 > STRESS 1000000
 ```
-
   
-
-**Output:**
-
+**Example Output:**
 ```
-Stress Test running for 1000000 ops...
+Stress Test running for 1000000 ops (in-memory only)...
 -------------------------------------------
-SET:       823534.13 ops/sec (1.214s total)
-UPDATE:   1813144.56 ops/sec (551.53ms total)
-GET:      2361762.58 ops/sec (423.41ms total)
-DEL:      1499790.07 ops/sec (666.76ms total)
+SET:        823534.13 ops/sec (1.214s total)
+UPDATE:    1813144.56 ops/sec (551.53ms total)
+GET:       2361762.58 ops/sec (423.41ms total)
+DEL:       1499790.07 ops/sec (666.76ms total)
 -------------------------------------------
 MAX RAM USAGE: 137.66 MB
--------------------------------------------
 Total Stress Test Time: 2.938s
 ```
 
 ---
 
-**`note` : the above STRESS command's Output is the real benchmark. we ran this test on Google Cloud Compute Engine named as `E2` - specification of this instance is `2 vCPU 1 Core` & `4GB RAM` .**
-  
-**The command `STRESS 1000000` states that it will run 1 Million operation for each 4 Commands - SET, UPDATE, GET, DEL . total 4Million commands has been fired in single run .**
+**`note`**: The above `STRESS` command's output is a real benchmark. We ran this test on a Google Cloud Compute Engine `E2` instance with `2 vCPU`, `1 Core`, & `4GB RAM`. The command `STRESS 1000000` runs 1 million operations for *each* of the 4 commands (SET, UPDATE, GET, DEL), totaling 4 million operations in a single run.
