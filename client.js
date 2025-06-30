@@ -13,7 +13,7 @@ const colors = {
 
 // --- Configuration ---
 const config = {
-  // host: "localhost", // Use 'localhost' or the server's IP address
+  host: "localhost", // Use 'localhost' or the server's IP address
   port: 8080,
 };
 

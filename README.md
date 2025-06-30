@@ -1,6 +1,6 @@
 ## NukeKV ☢️ - A High-Performance Key-Value Store
 
-Welcome to NukeKV, a lightweight, fast, and persistent key-value database server written in C++. It communicates via a custom, high-performance raw TCP protocol called **`nuke-wire`**, making it an exceptionally low-latency solution. This version includes **Advanced JSON Functionality**, allowing for complex CRUD operations and list manipulations inside your stored data.
+Welcome to NukeKV, a lightweight, fast, and persistent key-value database server written in modern C++. It communicates via a custom, high-performance raw TCP protocol called **`nuke-wire`**, making it an exceptionally low-latency solution. This version includes **Advanced JSON Functionality**, allowing for complex CRUD operations and list manipulations inside your stored data.
 
 **Supports**: Windows, Linux, MacOS.
 
@@ -8,10 +8,10 @@ Welcome to NukeKV, a lightweight, fast, and persistent key-value database server
 
 *   **Cross-Platform:** Compiles and runs on Windows, macOS, and Linux.
 *   **Blazing Fast:** Built in C++ with a multi-threaded, asynchronous core. The `nuke-wire` protocol eliminates HTTP overhead for maximum throughput.
-*   **Graceful Restarts:** The server can be immediately restarted without "Bind failed" errors, making it reliable in production and development environments.
-*   **Massive Payload Support:** The `nuke-wire` protocol is engineered to handle individual requests and responses well over 512MB in size.
+*   **Secure & Robust Payload Handling:** A 1GB payload sanity limit protects the server from malformed requests and potential memory exhaustion attacks, ensuring high stability.
+*   **Strict & Unambiguous Syntax:** Enforces strict quoting for `SET` and `JSON.SET` commands, eliminating ambiguity and ensuring data integrity.
 *   **Ephemeral Stress Testing:** The `STRESS` command is a pure in-memory benchmark that **does not write to disk** and cleans up after itself perfectly.
-*   **User-Friendly Startup:** Intelligently fetches and displays your public IP for easy client configuration.
+*   **Resilient Public IP Detection:** Intelligently queries multiple external services to find its public IP address, increasing reliability for easier client configuration.
 *   **Human-Readable Persistence:** Saves data to a formatted `nukekv.db` file and reloads it on startup.
 *   **Rich Data Types:** Supports standard string values and powerful native JSON objects and arrays.
 *   **Advanced JSON Queries:** Filter, update, search, delete, and append to JSON arrays using intuitive syntax.
@@ -65,23 +65,23 @@ node client.js
 | `DEBUG <true\|false>` | Enables or disables performance logging for each command.              |
 | `STATS`               | Shows detailed statistics about the server's state and performance.    |
 | `STRESS <count>`      | Runs a benchmark with `<count>` ops. **This is non-persistent and will not affect the database file.** |
-| `CLRDB` | **New!** Deletes all keys and values from the database. |
+| `CLRDB`               | Deletes all keys and values from the database.                         |
 | `QUIT`                | Instructs the server to perform a final save and shut down gracefully. |
 
 ### Basic Key-Value Commands
 
-| Command | Description |
-| :--- | :--- |
-| `SET <key> "<value>"` | Sets a key to a string value. |
-| `SET <key> "<value>" EX <seconds>` | Sets a key with an automatic expiration time. |
-| `GET <key>` | Retrieves the value of a key. Returns `(nil)` if not found. |
-| `UPDATE <key> "<new_value>"` | Updates the value of an *existing* key. Fails if the key doesn't exist. |
-| `DEL <key> [key2...]` | Deletes one or more keys. Returns the count of deleted keys. |
-| `INCR <key> [amount]` | Increments a numeric key by 1 or by a given `amount`. |
-| `DECR <key> [amount]` | Decrements a numeric key by 1 or by a given `amount`. |
-| `TTL <key>` | Gets the remaining time-to-live of a key in seconds. Returns `-1` if no TTL. |
-| `EXPIRE <key> <seconds>` | Sets or updates the TTL for an existing key. |
-| `SIMILAR <prefix>` | **New!** Returns the number of keys that start with the given prefix. |
+| Command                        | Description                                                                    |
+| :----------------------------- | :----------------------------------------------------------------------------- |
+| `SET <key> "<value>"`          | Sets a key to a string value. The value **must** be enclosed in double quotes. |
+| `SET <key> "<value>" EX <sec>` | Sets a key with an TTL. The value **must** be enclosed in double quotes.       |
+| `GET <key>`                    | Retrieves the value of a key. Returns `(nil)` if not found.                    |
+| `UPDATE <key> "<new_value>"`   | Updates an existing key. The value **must** be enclosed in double quotes.      |
+| `DEL <key> [key2...]`          | Deletes one or more keys. Returns the count of deleted keys.                   |
+| `INCR <key> [amount]`          | Increments a numeric key by 1 or by a given `amount`.                          |
+| `DECR <key> [amount]`          | Decrements a numeric key by 1 or by a given `amount`.                          |
+| `TTL <key>`                    | Gets the remaining time-to-live of a key in seconds. Returns `-1` if no TTL.   |
+| `EXPIRE <key> <seconds>`       | Sets or updates the TTL for an existing key.                                   |
+| `SIMILAR <prefix>`             | Returns the number of keys that start with the given prefix.                   |
 
 ---
 
@@ -89,48 +89,88 @@ node client.js
 
 NukeKV supports storing **any valid JSON**, including arrays of objects, and provides powerful tools to query and manipulate them. Keywords like `WHERE` and `SET` are case-insensitive.
 
-| Command | Description |
-| :--- | :--- |
-| `JSON.SET <key> '<json_string>'` | Sets a key to any valid JSON. |
-| `JSON.GET <key>` | Retrieves the entire JSON document, pretty-printed. |
-| `JSON.GET <key> WHERE <field> <value>`| Filters a JSON array, returning only objects where `<field>` equals `<value>`. |
-| `JSON.UPDATE <key> WHERE <f> <v> SET <f1> <v1>...`| Updates one or more fields in objects that match the `WHERE` clause. |
-| `JSON.SEARCH <key> "<term>"`| Performs a text search and returns the first matching object. |
-| `JSON.DEL <key> WHERE <field> <value>` | Deletes objects from a JSON array where `<field>` matches `<value>`. |
-| `JSON.APPEND <key> <f1> <v1> ...` | Appends a new object, built from key-value pairs, to a JSON array. |
+| Command                                        | Description                                                                                              |
+| :--------------------------------------------- | :------------------------------------------------------------------------------------------------------- |
+| `JSON.SET <key> '<json_string>'`               | Sets a key to any valid JSON. The JSON string **must** be enclosed in single quotes.                     |
+| `JSON.GET <key>`                               | Retrieves the entire JSON document, pretty-printed.                                                      |
+| `JSON.GET <key> WHERE <field> <value>`         | Filters a JSON array, returning only objects where `<field>` equals `<value>`.                           |
+| `JSON.UPDATE <key> WHERE <f> <v> SET <f1> <v1>`| Updates one or more fields in objects that match the `WHERE` clause.                                     |
+| `JSON.SEARCH <key> "<term>"`                   | Performs a text search and returns the first matching object. The term **must** be a double-quoted string. |
+| `JSON.DEL <key> WHERE <field> <value>`         | Deletes objects from a JSON array where `<field>` matches `<value>`.                                     |
+| `JSON.APPEND <key> '<json_to_append>'`         | Appends a JSON object or array elements to an existing array. The JSON **must** be in single quotes.      |
 
 #### **Complete JSON Workflow Example**
 
 Let's use a product catalog stored in the key `products`.
 
 **1. Set an initial JSON array:**
-```
+```bash
 JSON.SET products '[{"id":1,"name":"Smartphone X23","stock":50}]'
 ```
+*Server Response:* `+OK`
 
-**2. Append a new product to the array:**
+**2. Append a new product (as a JSON object) to the array:**
+```bash
+JSON.APPEND products '{"id":2, "name":"Laptop ProBook", "stock":20}'
 ```
-JSON.APPEND products id 2 name "Laptop ProBook" stock 20
-```
+*Server Response (new array size):* `2`
 
-**3. Get a specific product using `WHERE`:**
+**3. Append multiple products (as a JSON array) in one command:**
+```bash
+JSON.APPEND products '[{"id":3,"name":"Wireless Mouse","stock":75},{"id":4,"name":"Keyboard","stock":40}]'
 ```
+*Server Response (new array size):* `4`
+
+**4. Get a specific product using `WHERE`:**
+```bash
 JSON.GET products WHERE id 2
 ```
-
-**4. Update a product's stock using `WHERE` and `SET`:**
+*Server Response:*
+```json
+[
+  {
+    "id": 2,
+    "name": "Laptop ProBook",
+    "stock": 20
+  }
+]
 ```
+
+**5. Update a product's stock using `WHERE` and `SET`:**
+```bash
 JSON.UPDATE products WHERE name "Laptop ProBook" SET stock 15
 ```
+*Server Response (items updated):* `1`
 
-**5. Conditionally delete the smartphone from the catalog:**
-```
+**6. Conditionally delete the smartphone from the catalog:**
+```bash
 JSON.DEL products WHERE id 1
 ```
+*Server Response (items deleted):* `1`
 
-**6. Verify the final state of the catalog:**
-```
+**7. Verify the final state of the catalog:**
+```bash
 JSON.GET products
+```
+*Server Response:*
+```json
+[
+  {
+    "id": 2,
+    "name": "Laptop ProBook",
+    "stock": 15
+  },
+  {
+    "id": 3,
+    "name": "Wireless Mouse",
+    "stock": 75
+  },
+  {
+    "id": 4,
+    "name": "Keyboard",
+    "stock": 40
+  }
+]
 ```
 ---
   
@@ -141,13 +181,13 @@ JSON.GET products
 The `STATS` command provides a real-time snapshot of the server.
   
 **Example Command:**
-```
-> STATS
+```bash
+STATS
 ```
 
 **Example Output:**
 ```
-Version: NukeKV v2.0-nukewire ☢️
+Version: NukeKV v2.5 ☢️
 Protocol: nuke-wire (raw TCP)
 Debug Mode: ON
 Worker Threads: 7
@@ -166,13 +206,13 @@ Keys with TTL: 0
 The `STRESS` command benchmarks the core performance of the database without affecting saved data.
 
 **Example Command:**
-```
-> STRESS 1000000
+```bash
+STRESS 1000000
 ```
   
 **Example Output:**
 ```
-Stress Test running for 1000000 ops
+Stress Test running for 1000000 ops ...
 -------------------------------------------
 SET:      1262786.67 ops/sec (791.90ms total)
 UPDATE:   2618733.44 ops/sec (381.86ms total)

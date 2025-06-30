@@ -76,6 +76,8 @@ using HandlerResult = std::pair<int, std::string>;
 
 // --- Basic Configuration ---
 const unsigned short SERVER_PORT = 8080;
+// FIXED: A security and stability feature to prevent memory exhaustion from malicious or malformed requests.
+const uint64_t MAX_PAYLOAD_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB sanity limit
 std::atomic<bool> DEBUG_MODE(true);
 bool PERSISTENCE_ENABLED = true;
 std::string DATABASE_FILENAME = "nukekv.db";
@@ -136,7 +138,6 @@ inline bool json_contains_text(const json& j, const std::string& term) {
     return false;
 }
 
-// --- Forward Declarations ---
 class NukeKV;
 struct Task { std::string command_str; std::vector<std::string> args; std::promise<HandlerResult> promise; };
 
@@ -156,7 +157,6 @@ private:
     std::atomic<bool> stop_all_ = false;
     std::thread background_manager_thread_;
     std::atomic<int> dirty_operations_ = 0;
-    // FIXED: The missing member variable declaration is now restored.
     std::atomic<unsigned long long> estimated_memory_usage_ = 0;
     unsigned long long max_memory_bytes_ = 0;
     
@@ -175,10 +175,11 @@ private:
     HandlerResult _handle_json_update(const std::vector<std::string>& args) { if (args.size() < 4) return {400, "-ERR invalid syntax for JSON.UPDATE"}; auto where_it = std::find(args.begin(), args.end(), "WHERE"); auto set_it = std::find(args.begin(), args.end(), "SET"); if (where_it == args.end() || set_it == args.end() || std::distance(where_it, set_it) != 3) return {400, "-ERR syntax error. Expected: ... WHERE <field> <value> SET ..."}; const std::string& key = args[0]; const std::string& where_field = *(where_it + 1); json where_value; try { where_value = json::parse(*(where_it + 2)); } catch(...) { where_value = *(where_it + 2); } if (std::distance(set_it, args.end()) < 3 || (std::distance(set_it, args.end()) - 1) % 2 != 0) return {400, "-ERR syntax error. Expected: ... SET <field1> <value1> ..."}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch(...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR `WHERE` clause can only be used on JSON arrays."}; int updated_count = 0; for (auto& item : doc) { if (item.is_object() && item.contains(where_field) && item[where_field] == where_value) { for (auto it = set_it + 1; it != args.end() && it + 1 != args.end(); it += 2) { const auto& set_field = *it; json set_value; try { set_value = json::parse(*(it + 1)); } catch(...) { set_value = *(it + 1); } item[set_field] = set_value; } updated_count++; } } if (updated_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(updated_count)}; }
     HandlerResult _handle_json_del(const std::vector<std::string>& args) { if (args.empty()) return {400, "-ERR wrong number of arguments"}; if (args.size() == 1) return _handle_del(args); if (args.size() != 4 || args[1] != "WHERE") return {400, "-ERR syntax: JSON.DEL <key> [WHERE <field> <value>]"}; const auto& key = args[0]; const auto& field = args[2]; json value_to_find; try { value_to_find = json::parse(args[3]); } catch (...) { value_to_find = args[3]; } std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR WHERE clause can only be used on JSON arrays."}; auto original_array_size = doc.size(); doc.erase(std::remove_if(doc.begin(), doc.end(), [&](const json& item) { return item.is_object() && item.contains(field) && item[field] == value_to_find; }), doc.end()); auto deleted_count = original_array_size - doc.size(); if (deleted_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(deleted_count)}; }
     HandlerResult _handle_json_search(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR syntax: JSON.SEARCH <key> \"<term>\""}; const auto& key = args[0]; const auto& term = args[1]; std::string result_dump; { std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } bool found = false; if (doc.is_array()) { for (const auto& item : doc) { if (json_contains_text(item, term)) { result_dump = item.dump(2); found = true; break; } } } else { if (json_contains_text(doc, term)) { result_dump = doc.dump(2); found = true; } } if (!found) return {404, "(nil)"}; } { std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; _update_lru(key); } return {200, result_dump}; }
-    HandlerResult _handle_json_append(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments. Syntax: JSON.APPEND <key> '<object_to_append>'"}; const auto& key = args[0]; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR value at key is not a JSON array"}; } if (!doc.is_array()) return {400, "-ERR value at key is not a JSON array"}; json new_object; try { new_object = json::parse(args[1]); } catch(const json::parse_error& e) { return {400, std::string("-ERR invalid JSON for append: ") + e.what()}; } if(!new_object.is_object()) return {400, "-ERR append value must be a JSON object"}; doc.push_back(new_object); std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(doc.size())}; }
+    // FIXED: Updated JSON.APPEND to be consistent with JSON.SET syntax and logic.
+    HandlerResult _handle_json_append(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments. Syntax: JSON.APPEND <key> '<json_to_append>'"}; const auto& key = args[0]; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR value at key is not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR APPEND requires the value at key to be a JSON array"}; json new_json; try { new_json = json::parse(args[1]); } catch(const json::parse_error& e) { return {400, std::string("-ERR invalid JSON for append: ") + e.what()}; } if (new_json.is_object()) { doc.push_back(new_json); } else if (new_json.is_array()) { doc.insert(doc.end(), new_json.begin(), new_json.end()); } else { return {400, "-ERR append value must be a JSON object or array"}; } std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(doc.size())}; }
     HandlerResult _handle_ttl(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR wrong number of arguments"}; std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; if (!ttl_map_.count(args[0])) return {200, "-1"}; auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); long long expiry_ms = ttl_map_.at(args[0]); if (now_ms > expiry_ms) return {404, "(nil)"}; return {200, std::to_string((expiry_ms - now_ms) / 1000)}; }
     HandlerResult _handle_expire(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments"}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; try { long long ttl_s = std::stoll(args[1]); if (ttl_s <= 0) { ttl_map_.erase(args[0]); } else { ttl_map_[args[0]] = std::chrono::duration_cast<std::chrono::milliseconds>((std::chrono::system_clock::now() + std::chrono::seconds(ttl_s)).time_since_epoch()).count(); } } catch (...) { return {400, "-ERR invalid TTL value"}; } dirty_operations_++; if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, "+OK"}; }
-    HandlerResult _handle_stats() { std::shared_lock<std::shared_mutex> lock(data_mutex_); int num_threads = (WORKERS_THREAD_COUNT <= 0) ? std::max(1u, std::thread::hardware_concurrency() - 1) : WORKERS_THREAD_COUNT; std::stringstream ss; ss << "Version: NukeKV v2.0 ☢️\n"; ss << "Protocol: nuke-wire (raw TCP)\n"; ss << "Debug Mode: " << (DEBUG_MODE.load() ? "ON" : "OFF") << "\n"; ss << "Worker Threads: " << num_threads << "\n"; ss << "Persistence: " << (PERSISTENCE_ENABLED ? "Enabled" : "Disabled") << "\n"; if (PERSISTENCE_ENABLED) ss << "  - Batch Size: " << BATCH_PROCESSING_SIZE.load() << "\n  - Unsaved Ops: " << dirty_operations_.load() << "\n"; ss << "Caching: " << (CACHING_ENABLED ? "Enabled" : "Disabled") << "\n"; if (CACHING_ENABLED) ss << "  - Memory Limit: " << (max_memory_bytes_ > 0 ? format_memory_size(max_memory_bytes_) : "Unlimited") << "\n  - Memory Used: " << format_memory_size(get_current_ram_usage()) << "\n"; ss << "Total Keys: " << kv_store_.size() << "\n"; ss << "Keys with TTL: " << ttl_map_.size(); return {200, ss.str()}; }
+    HandlerResult _handle_stats() { std::shared_lock<std::shared_mutex> lock(data_mutex_); int num_threads = (WORKERS_THREAD_COUNT <= 0) ? std::max(1u, std::thread::hardware_concurrency() - 1) : WORKERS_THREAD_COUNT; std::stringstream ss; ss << "Version: NukeKV v2.5 ☢️\n"; ss << "Protocol: nuke-wire (raw TCP)\n"; ss << "Debug Mode: " << (DEBUG_MODE.load() ? "ON" : "OFF") << "\n"; ss << "Worker Threads: " << num_threads << "\n"; ss << "Persistence: " << (PERSISTENCE_ENABLED ? "Enabled" : "Disabled") << "\n"; if (PERSISTENCE_ENABLED) ss << "  - Batch Size: " << BATCH_PROCESSING_SIZE.load() << "\n  - Unsaved Ops: " << dirty_operations_.load() << "\n"; ss << "Caching: " << (CACHING_ENABLED ? "Enabled" : "Disabled") << "\n"; if (CACHING_ENABLED) ss << "  - Memory Limit: " << (max_memory_bytes_ > 0 ? format_memory_size(max_memory_bytes_) : "Unlimited") << "\n  - Memory Used: " << format_memory_size(get_current_ram_usage()) << "\n"; ss << "Total Keys: " << kv_store_.size() << "\n"; ss << "Keys with TTL: " << ttl_map_.size(); return {200, ss.str()}; }
     HandlerResult _handle_batch(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR BATCH requires one argument"}; int new_size; try { new_size = std::stoi(args[0]); } catch(...) { return {400, "-ERR value is not an integer"}; } if (new_size < 0) return {400, "-ERR batch size cannot be negative"}; BATCH_PROCESSING_SIZE.store(new_size); return {200, "+OK"}; }
     HandlerResult _handle_debug(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR DEBUG requires one argument"}; std::string mode = args[0]; std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c){ return ::tolower(c); }); if (mode == "true") { DEBUG_MODE.store(true); return {200, "+OK Debug mode enabled."}; } else if (mode == "false") { DEBUG_MODE.store(false); return {200, "+OK Debug mode disabled."}; } return {400, "-ERR Invalid argument. Use 'true' or 'false'."}; }
     HandlerResult _handle_stress(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR STRESS requires one argument"}; int count; try { count = std::stoi(args[0]); } catch (...) { return {400, "-ERR invalid number"}; } if (count <= 0) return {400, "-ERR count must be positive"}; std::cout << "\n[INFO] Starting stress test" << std::endl; auto overall_start = high_res_clock::now(); std::vector<std::string> keys(count); for(int i=0;i<count;++i)keys[i]="stress:"+std::to_string(i); std::unordered_map<std::string,std::string> stress_store; stress_store.reserve(count); auto run_benchmark=[&](auto op){auto start=high_res_clock::now(); for(int i=0;i<count;++i)op(stress_store,i); return std::chrono::duration<double>(high_res_clock::now()-start).count();}; std::stringstream ss; ss << "Stress Test running for " << count << " ops ...\n" << "-------------------------------------------"; auto set_op=[&](auto& store, int i){store[keys[i]]="svalue";}; double set_dur=run_benchmark(set_op); ss<<"\n"<<std::left<<std::setw(8)<<"SET:"<<std::right<<std::setw(12)<<std::fixed<<std::setprecision(2)<<(count/set_dur)<<" ops/sec ("<<format_duration(set_dur)<<" total)"; auto update_op=[&](auto& store, int i){store[keys[i]]="nvalue";}; double update_dur=run_benchmark(update_op); ss<<"\n"<<std::left<<std::setw(8)<<"UPDATE:"<<std::right<<std::setw(12)<<std::fixed<<std::setprecision(2)<<(count/update_dur)<<" ops/sec ("<<format_duration(update_dur)<<" total)"; auto get_op=[&](auto& store, int i){(void)store.at(keys[i]);}; double get_dur=run_benchmark(get_op); ss<<"\n"<<std::left<<std::setw(8)<<"GET:"<<std::right<<std::setw(12)<<std::fixed<<std::setprecision(2)<<(count/get_dur)<<" ops/sec ("<<format_duration(get_dur)<<" total)"; auto del_op=[&](auto& store, int i){store.erase(keys[i]);}; double del_dur=run_benchmark(del_op); ss<<"\n"<<std::left<<std::setw(8)<<"DEL:"<<std::right<<std::setw(12)<<std::fixed<<std::setprecision(2)<<(count/del_dur)<<" ops/sec ("<<format_duration(del_dur)<<" total)"; double total_time=std::chrono::duration<double>(high_res_clock::now()-overall_start).count(); ss<<"\n-------------------------------------------\n"<<"MAX RAM USAGE: "<<format_memory_size(get_current_ram_usage())<<"\nTotal Stress Test Time: "<<format_duration(total_time); std::cout << "[INFO] Stress test complete. All test data disposed from memory." << std::endl; return {200, ss.str()}; }
@@ -202,8 +203,7 @@ void NukeKV::load_from_file() { if (!PERSISTENCE_ENABLED) return; std::ifstream 
 
 // --- Command Line Parser ---
 inline std::vector<std::string> parse_command_line(const std::string& line) {
-    std::vector<std::string> args;
-    if (line.empty()) return args;
+    std::vector<std::string> args; if (line.empty()) return args;
     size_t cmd_end = line.find(' ');
     std::string command = (cmd_end == std::string::npos) ? line : line.substr(0, cmd_end);
     args.push_back(command);
@@ -222,14 +222,10 @@ inline std::vector<std::string> parse_command_line(const std::string& line) {
         size_t ex_pos = line.rfind(" EX ");
         if (ex_pos != std::string::npos && ex_pos > value_divider_pos) {
             if (line[value_start] != required_quote || ex_pos < value_start || line[ex_pos - 1] != required_quote) return args;
-            args.push_back(key);
-            args.push_back(line.substr(value_start + 1, ex_pos - value_start - 2));
-            args.push_back("EX");
-            args.push_back(line.substr(ex_pos + 4));
+            args.push_back(key); args.push_back(line.substr(value_start + 1, ex_pos - value_start - 2)); args.push_back("EX"); args.push_back(line.substr(ex_pos + 4));
         } else {
              if (value_start == std::string::npos || line[value_start] != required_quote || line.back() != required_quote) return args;
-             args.push_back(key);
-             args.push_back(line.substr(value_start + 1, line.length() - value_start - 2));
+             args.push_back(key); args.push_back(line.substr(value_start + 1, line.length() - value_start - 2));
         }
     } else {
         std::string current_arg; char quote_type=0; for (size_t i=cmd_end+1; i<line.length(); ++i) { char c=line[i]; if(quote_type==0 && (c=='\''||c=='"')) {if(!current_arg.empty()){args.push_back(current_arg);current_arg.clear();} quote_type=c;} else if(c==quote_type){quote_type=0;} else if(quote_type==0&&isspace(c)){if(!current_arg.empty()){args.push_back(current_arg);current_arg.clear();}} else{current_arg+=c;}} if(!current_arg.empty())args.push_back(current_arg);
@@ -242,7 +238,18 @@ inline std::vector<std::string> parse_command_line(const std::string& line) {
 inline bool send_all(socket_t sock, const char* buf, size_t len) { size_t sent=0; while(sent<len){int n=send(sock,buf+sent,len-sent,0); if(n<=0)return false; sent+=n;} return true; }
 inline bool send_message(socket_t sock, const std::string& msg) { uint64_t len=msg.length(), net_len=nuke_htonll(len); if(!send_all(sock,reinterpret_cast<const char*>(&net_len),sizeof(net_len)))return false; if(len>0&&!send_all(sock,msg.c_str(),len))return false; return true; }
 inline bool recv_all(socket_t sock, char* buf, size_t len) { size_t recvd=0; while(recvd<len){int n=recv(sock,buf+recvd,len-recvd,0); if(n<=0)return false; recvd+=n;} return true; }
-inline bool recv_message(socket_t sock, std::string& msg) { uint64_t net_len; if (!recv_all(sock, reinterpret_cast<char*>(&net_len), sizeof(net_len))) return false; uint64_t msg_len = nuke_ntohll(net_len); if (msg_len == 0) { msg.clear(); return true; } try { msg.resize(msg_len); } catch (const std::bad_alloc&) { std::cerr << "[FATAL] Failed to allocate memory for message of " << format_memory_size(msg_len) << std::endl; return false; } return recv_all(sock, &msg[0], msg_len); }
+inline bool recv_message(socket_t sock, std::string& msg) {
+    uint64_t net_len;
+    if (!recv_all(sock, reinterpret_cast<char*>(&net_len), sizeof(net_len))) return false;
+    uint64_t msg_len = nuke_ntohll(net_len);
+    if (msg_len > MAX_PAYLOAD_SIZE) { 
+        std::cerr << "[SECURITY] Client tried to send payload of " << format_memory_size(msg_len) << " which exceeds the " << format_memory_size(MAX_PAYLOAD_SIZE) << " limit. Closing connection." << std::endl;
+        return false;
+    }
+    if (msg_len == 0) { msg.clear(); return true; } 
+    try { msg.resize(msg_len); } catch (const std::bad_alloc&) { std::cerr << "[FATAL] Failed to allocate memory for message of " << format_memory_size(msg_len) << std::endl; return false; } 
+    return recv_all(sock, &msg[0], msg_len);
+}
 
 void handle_client(socket_t client_socket, NukeKV* db_engine) {
     while (true) {
@@ -295,7 +302,7 @@ int main() {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(SERVER_PORT);
 
-    if (bind(listen_socket, (sockaddr*)&server_addr, sizeof(server_addr)) != 0) { std::cerr << "[FATAL] Bind failed." << std::endl; close_socket(listen_socket); return 1; }
+    if (bind(listen_socket, (sockaddr*)&server_addr, sizeof(server_addr)) != 0) { std::cerr << "[FATAL] Bind failed on port " << SERVER_PORT << "." << std::endl; close_socket(listen_socket); return 1; }
     if (listen(listen_socket, SOMAXCONN) != 0) { std::cerr << "[FATAL] Listen failed." << std::endl; close_socket(listen_socket); return 1; }
 
     std::cout << R"(
@@ -309,7 +316,7 @@ int main() {
     $$ | $$$ |$$    $$/ $$ | $$  |$$       |     $$ | $$  |   $$$/    
     $$/   $$/  $$$$$$/  $$/   $$/ $$$$$$$$/      $$/   $$/     $/     
     )" << std::endl;
-    std::cout << "NukeKV v2.0 - Protocol: nuke-wire (Raw TCP)" << std::endl;
+    std::cout << "NukeKV v2.5 - Protocol: nuke-wire (Raw TCP)" << std::endl;
     std::cout << "=================================================================" << std::endl;
 
     std::string public_ip = (public_ip_future.wait_for(std::chrono::seconds(3)) == std::future_status::ready) ? public_ip_future.get() : "";
