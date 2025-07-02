@@ -76,9 +76,9 @@ using HandlerResult = std::pair<int, std::string>;
 
 // --- Basic Configuration ---
 const unsigned short SERVER_PORT = 8080;
-// FIXED: A security and stability feature to prevent memory exhaustion from malicious or malformed requests.
+// CRITICAL: This security and stability feature prevents memory exhaustion from malicious scanners or malformed requests.
 const uint64_t MAX_PAYLOAD_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB sanity limit
-std::atomic<bool> DEBUG_MODE(true);
+std::atomic<bool> DEBUG_MODE(false); // Set to 'false' by default for clean production logs
 bool PERSISTENCE_ENABLED = true;
 std::string DATABASE_FILENAME = "nukekv.db";
 
@@ -89,7 +89,7 @@ int WORKERS_THREAD_COUNT = 0;
 std::atomic<int> BATCH_PROCESSING_SIZE = 1;
 
 // --- Utility Functions ---
-inline std::string format_memory_size(unsigned long long bytes) { if (bytes == 0) return "0 B"; const char* suffixes[] = {"B", "KB", "MB", "GB", "TB"}; int i = 0; double d_bytes = bytes; while (d_bytes >= 1024 && i < 4) { d_bytes /= 1024; i++; } std::stringstream ss; ss << std::fixed << std::setprecision(2) << d_bytes << " " << suffixes[i]; return ss.str(); }
+inline std::string format_memory_size(unsigned long long bytes) { if (bytes == 0) return "0 B"; const char* suffixes[] = {"B", "KB", "MB", "GB", "TB", "PB"}; int i = 0; double d_bytes = bytes; while (d_bytes >= 1024 && i < 5) { d_bytes /= 1024; i++; } std::stringstream ss; ss << std::fixed << std::setprecision(2) << d_bytes << " " << suffixes[i]; return ss.str(); }
 inline std::string format_duration(double seconds) { std::stringstream ss; ss << std::fixed; if (seconds < 0.001) ss << std::setprecision(2) << seconds * 1000000.0 << u8"µs"; else if (seconds < 1.0) ss << std::setprecision(2) << seconds * 1000.0 << "ms"; else if (seconds < 60.0) ss << std::setprecision(3) << seconds << "s"; else if (seconds < 3600.0) { ss << static_cast<int>(seconds) / 60 << "m " << std::setprecision(2) << fmod(seconds, 60.0) << "s"; } else { ss << static_cast<int>(seconds) / 3600 << "h " << static_cast<int>(fmod(seconds, 3600.0)) / 60 << "m " << std::setprecision(2) << fmod(seconds, 60.0) << "s"; } return ss.str(); }
 inline json::json_pointer to_json_pointer(const std::string& path) { if (path.empty() || path == "$") return json::json_pointer(""); std::string p = path; if (p.rfind("$.", 0) == 0) p = p.substr(2); else if (p.rfind("$[", 0) == 0) p = p.substr(1); std::replace(p.begin(), p.end(), '.', '/'); std::string res; for (char c : p) { if (c == '[') res += '/'; else if (c != ']') res += c; } return json::json_pointer("/" + res); }
 
@@ -175,7 +175,6 @@ private:
     HandlerResult _handle_json_update(const std::vector<std::string>& args) { if (args.size() < 4) return {400, "-ERR invalid syntax for JSON.UPDATE"}; auto where_it = std::find(args.begin(), args.end(), "WHERE"); auto set_it = std::find(args.begin(), args.end(), "SET"); if (where_it == args.end() || set_it == args.end() || std::distance(where_it, set_it) != 3) return {400, "-ERR syntax error. Expected: ... WHERE <field> <value> SET ..."}; const std::string& key = args[0]; const std::string& where_field = *(where_it + 1); json where_value; try { where_value = json::parse(*(where_it + 2)); } catch(...) { where_value = *(where_it + 2); } if (std::distance(set_it, args.end()) < 3 || (std::distance(set_it, args.end()) - 1) % 2 != 0) return {400, "-ERR syntax error. Expected: ... SET <field1> <value1> ..."}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch(...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR `WHERE` clause can only be used on JSON arrays."}; int updated_count = 0; for (auto& item : doc) { if (item.is_object() && item.contains(where_field) && item[where_field] == where_value) { for (auto it = set_it + 1; it != args.end() && it + 1 != args.end(); it += 2) { const auto& set_field = *it; json set_value; try { set_value = json::parse(*(it + 1)); } catch(...) { set_value = *(it + 1); } item[set_field] = set_value; } updated_count++; } } if (updated_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(updated_count)}; }
     HandlerResult _handle_json_del(const std::vector<std::string>& args) { if (args.empty()) return {400, "-ERR wrong number of arguments"}; if (args.size() == 1) return _handle_del(args); if (args.size() != 4 || args[1] != "WHERE") return {400, "-ERR syntax: JSON.DEL <key> [WHERE <field> <value>]"}; const auto& key = args[0]; const auto& field = args[2]; json value_to_find; try { value_to_find = json::parse(args[3]); } catch (...) { value_to_find = args[3]; } std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR WHERE clause can only be used on JSON arrays."}; auto original_array_size = doc.size(); doc.erase(std::remove_if(doc.begin(), doc.end(), [&](const json& item) { return item.is_object() && item.contains(field) && item[field] == value_to_find; }), doc.end()); auto deleted_count = original_array_size - doc.size(); if (deleted_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(deleted_count)}; }
     HandlerResult _handle_json_search(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR syntax: JSON.SEARCH <key> \"<term>\""}; const auto& key = args[0]; const auto& term = args[1]; std::string result_dump; { std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } bool found = false; if (doc.is_array()) { for (const auto& item : doc) { if (json_contains_text(item, term)) { result_dump = item.dump(2); found = true; break; } } } else { if (json_contains_text(doc, term)) { result_dump = doc.dump(2); found = true; } } if (!found) return {404, "(nil)"}; } { std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; _update_lru(key); } return {200, result_dump}; }
-    // FIXED: Updated JSON.APPEND to be consistent with JSON.SET syntax and logic.
     HandlerResult _handle_json_append(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments. Syntax: JSON.APPEND <key> '<json_to_append>'"}; const auto& key = args[0]; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR value at key is not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR APPEND requires the value at key to be a JSON array"}; json new_json; try { new_json = json::parse(args[1]); } catch(const json::parse_error& e) { return {400, std::string("-ERR invalid JSON for append: ") + e.what()}; } if (new_json.is_object()) { doc.push_back(new_json); } else if (new_json.is_array()) { doc.insert(doc.end(), new_json.begin(), new_json.end()); } else { return {400, "-ERR append value must be a JSON object or array"}; } std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(doc.size())}; }
     HandlerResult _handle_ttl(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR wrong number of arguments"}; std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; if (!ttl_map_.count(args[0])) return {200, "-1"}; auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); long long expiry_ms = ttl_map_.at(args[0]); if (now_ms > expiry_ms) return {404, "(nil)"}; return {200, std::to_string((expiry_ms - now_ms) / 1000)}; }
     HandlerResult _handle_expire(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments"}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; try { long long ttl_s = std::stoll(args[1]); if (ttl_s <= 0) { ttl_map_.erase(args[0]); } else { ttl_map_[args[0]] = std::chrono::duration_cast<std::chrono::milliseconds>((std::chrono::system_clock::now() + std::chrono::seconds(ttl_s)).time_since_epoch()).count(); } } catch (...) { return {400, "-ERR invalid TTL value"}; } dirty_operations_++; if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, "+OK"}; }
@@ -238,42 +237,94 @@ inline std::vector<std::string> parse_command_line(const std::string& line) {
 inline bool send_all(socket_t sock, const char* buf, size_t len) { size_t sent=0; while(sent<len){int n=send(sock,buf+sent,len-sent,0); if(n<=0)return false; sent+=n;} return true; }
 inline bool send_message(socket_t sock, const std::string& msg) { uint64_t len=msg.length(), net_len=nuke_htonll(len); if(!send_all(sock,reinterpret_cast<const char*>(&net_len),sizeof(net_len)))return false; if(len>0&&!send_all(sock,msg.c_str(),len))return false; return true; }
 inline bool recv_all(socket_t sock, char* buf, size_t len) { size_t recvd=0; while(recvd<len){int n=recv(sock,buf+recvd,len-recvd,0); if(n<=0)return false; recvd+=n;} return true; }
+
+// --- BUG FIX & ENHANCEMENT: Hardened against internet scanners and bots ---
 inline bool recv_message(socket_t sock, std::string& msg) {
     uint64_t net_len;
-    if (!recv_all(sock, reinterpret_cast<char*>(&net_len), sizeof(net_len))) return false;
-    uint64_t msg_len = nuke_ntohll(net_len);
-    if (msg_len > MAX_PAYLOAD_SIZE) { 
-        std::cerr << "[SECURITY] Client tried to send payload of " << format_memory_size(msg_len) << " which exceeds the " << format_memory_size(MAX_PAYLOAD_SIZE) << " limit. Closing connection." << std::endl;
+    // If a scanner connects and disconnects, or sends garbage that isn't 8 bytes,
+    // this will fail. We return false to silently close the connection without logging errors.
+    if (!recv_all(sock, reinterpret_cast<char*>(&net_len), sizeof(net_len))) {
         return false;
     }
-    if (msg_len == 0) { msg.clear(); return true; } 
-    try { msg.resize(msg_len); } catch (const std::bad_alloc&) { std::cerr << "[FATAL] Failed to allocate memory for message of " << format_memory_size(msg_len) << std::endl; return false; } 
+
+    uint64_t msg_len = nuke_ntohll(net_len);
+
+    // This is the CRITICAL security check. If a bot sends junk (like an HTTP request),
+    // the first 8 bytes will be interpreted as a massive number. This check prevents
+    // the server from crashing by trying to allocate that memory.
+    if (msg_len > MAX_PAYLOAD_SIZE) { 
+        // We now ONLY log this if DEBUG_MODE is on, to keep production logs clean.
+        if (DEBUG_MODE.load(std::memory_order_relaxed)) {
+            std::cout << "[INFO] A client sent a malformed header with payload size " 
+                      << format_memory_size(msg_len) << ", exceeding the " 
+                      << format_memory_size(MAX_PAYLOAD_SIZE) << " limit. Connection closed." << std::endl;
+        }
+        return false; // Silently and safely close the connection.
+    }
+
+    if (msg_len == 0) { 
+        msg.clear(); 
+        return true; 
+    } 
+    
+    try { 
+        msg.resize(msg_len); 
+    } catch (const std::bad_alloc&) { 
+        // This is a failsafe in the unlikely event the MAX_PAYLOAD_SIZE is set too high
+        // for the machine's available RAM.
+        if (DEBUG_MODE.load(std::memory_order_relaxed)) {
+            std::cerr << "[FATAL] Failed to allocate memory for message of " << format_memory_size(msg_len) << std::endl; 
+        }
+        return false; 
+    } 
+    
     return recv_all(sock, &msg[0], msg_len);
 }
+
 
 void handle_client(socket_t client_socket, NukeKV* db_engine) {
     while (true) {
         std::string command_line;
-        if (!recv_message(client_socket, command_line)) break; 
+        if (!recv_message(client_socket, command_line)) {
+            // This will now trigger for legitimate disconnects OR silent scanner rejections.
+            break; 
+        }
+
         auto args = parse_command_line(command_line);
         high_res_clock::time_point start_time;
-        if (DEBUG_MODE.load(std::memory_order_relaxed)) start_time = high_res_clock::now();
+        if (DEBUG_MODE.load(std::memory_order_relaxed)) {
+            start_time = high_res_clock::now();
+        }
+
         HandlerResult result_pair;
-        if (args.empty()) { result_pair = {400, "-ERR empty command"};
+        if (args.empty()) { 
+            result_pair = {400, "-ERR empty command"};
         } else {
             std::string command = args[0];
             std::transform(command.begin(), command.end(), command.begin(), [](unsigned char c){ return ::toupper(c); });
             args.erase(args.begin());
-            if (command == "QUIT") { result_pair = {200, "+OK Bye"}; send_message(client_socket, result_pair.second); break; }
-            else if (command == "PING") { result_pair = {200, "+PONG"}; }
-            else { auto future = db_engine->dispatch_command(command, args); result_pair = future.get(); }
+
+            if (command == "QUIT") { 
+                result_pair = {200, "+OK Bye"}; 
+                send_message(client_socket, result_pair.second); 
+                break; 
+            } else if (command == "PING") { 
+                result_pair = {200, "+PONG"}; 
+            } else { 
+                auto future = db_engine->dispatch_command(command, args); 
+                result_pair = future.get(); 
+            }
         }
+        
         std::string result_text = result_pair.second;
         if (DEBUG_MODE.load(std::memory_order_relaxed) && result_text.rfind("Stress Test", 0) != 0) {
             auto duration_s = std::chrono::duration<double>(high_res_clock::now() - start_time).count();
             result_text += " (" + format_duration(duration_s) + ")";
         }
-        if (!send_message(client_socket, result_text)) break;
+
+        if (!send_message(client_socket, result_text)) {
+            break;
+        }
     }
     close_socket(client_socket);
 }
