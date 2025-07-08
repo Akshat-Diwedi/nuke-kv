@@ -141,15 +141,54 @@ inline std::string get_public_ip() {
     return ""; 
 }
 
-inline bool json_contains_text(const json& j, const std::string& term) {
+// ** NEW: Helper function for advanced word search **
+inline bool is_word_delimiter(unsigned char c) {
+    // A delimiter is anything NOT a letter or a number.
+    // This is faster than std::isalnum and not locale-dependent.
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'));
+}
+
+// ** NEW: Advanced word-based, case-insensitive recursive JSON search **
+inline bool json_contains_word(const json& j, const std::string& term) {
+    // Predicate for case-insensitive comparison, defined once as a static local for efficiency
+    static const auto case_insensitive_equals = [](unsigned char c1, unsigned char c2) {
+        return std::tolower(c1) == std::tolower(c2);
+    };
+
     if (j.is_string()) {
-        std::string str = j.get<std::string>();
-        auto it = std::search(str.begin(), str.end(), term.begin(), term.end(), [](char ch1, char ch2) { return std::tolower(ch1) == std::tolower(ch2); });
-        return it != str.end();
+        const std::string& text = j.get<std::string>();
+        if (term.length() > text.length()) return false;
+
+        auto it = text.begin();
+        while (it != text.end()) {
+            // Use std::search with the custom predicate to find a potential match
+            it = std::search(it, text.end(), term.begin(), term.end(), case_insensitive_equals);
+
+            if (it == text.end()) {
+                break; // No more potential matches in the rest of the string
+            }
+
+            // A potential match was found, now verify it's a whole word by checking boundaries
+            size_t pos = std::distance(text.begin(), it);
+            bool left_boundary_ok = (pos == 0) || is_word_delimiter(text[pos - 1]);
+            bool right_boundary_ok = (pos + term.length() == text.length()) || is_word_delimiter(text[pos + term.length()]);
+
+            if (left_boundary_ok && right_boundary_ok) {
+                return true; // Confirmed whole word match
+            }
+            
+            // Not a whole word, so advance iterator to continue searching after this spot
+            ++it;
+        }
+        return false; // No whole word match found in this string
     } else if (j.is_object()) {
-        for (const auto& el : j.items()) { if (json_contains_text(el.value(), term)) return true; }
+        for (const auto& el : j.items()) {
+            if (json_contains_word(el.value(), term)) return true;
+        }
     } else if (j.is_array()) {
-        for (const auto& el : j) { if (json_contains_text(el, term)) return true; }
+        for (const auto& el : j) {
+            if (json_contains_word(el, term)) return true;
+        }
     }
     return false;
 }
@@ -190,7 +229,84 @@ private:
     HandlerResult _handle_json_get(const std::vector<std::string>& args) { if (args.empty()) return {400, "-ERR wrong number of arguments"}; const auto& key = args[0]; std::string result_dump; { std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } auto where_it = std::find(args.begin(), args.end(), "WHERE"); if (where_it != args.end()) { if (std::distance(where_it, args.end()) != 3) return {400, "-ERR syntax: ... WHERE <field> <value>"}; if (!doc.is_array()) return {400, "-ERR `WHERE` clause can only be used on JSON arrays."}; const auto& field = *(where_it + 1); json value_to_find; try { value_to_find = json::parse(*(where_it + 2)); } catch(...) { value_to_find = *(where_it + 2); } json results = json::array(); for (const auto& item : doc) { if (item.is_object() && item.contains(field) && item[field] == value_to_find) { results.push_back(item); } } if (results.empty()) return {404, "[]"}; result_dump = results.dump(2); } else if (args.size() > 1) { json result = json::object(); for (size_t i = 1; i < args.size(); ++i) { std::string path_key = args[i]; std::string clean_key = path_key; if (clean_key.rfind("$.", 0) == 0) clean_key = clean_key.substr(2); else if (clean_key.rfind("$[", 0) == 0) clean_key = clean_key.substr(1); try { result[clean_key] = doc.at(to_json_pointer(path_key)); } catch (...) { result[clean_key] = nullptr; } } result_dump = result.dump(2); } else { result_dump = doc.dump(2); } } { std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; _update_lru(key); } return {200, result_dump}; }
     HandlerResult _handle_json_update(const std::vector<std::string>& args) { if (args.size() < 4) return {400, "-ERR invalid syntax for JSON.UPDATE"}; auto where_it = std::find(args.begin(), args.end(), "WHERE"); auto set_it = std::find(args.begin(), args.end(), "SET"); if (where_it == args.end() || set_it == args.end() || std::distance(where_it, set_it) != 3) return {400, "-ERR syntax error. Expected: ... WHERE <field> <value> SET ..."}; const std::string& key = args[0]; const std::string& where_field = *(where_it + 1); json where_value; try { where_value = json::parse(*(where_it + 2)); } catch(...) { where_value = *(where_it + 2); } if (std::distance(set_it, args.end()) < 3 || (std::distance(set_it, args.end()) - 1) % 2 != 0) return {400, "-ERR syntax error. Expected: ... SET <field1> <value1> ..."}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch(...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR `WHERE` clause can only be used on JSON arrays."}; int updated_count = 0; for (auto& item : doc) { if (item.is_object() && item.contains(where_field) && item[where_field] == where_value) { for (auto it = set_it + 1; it != args.end() && it + 1 != args.end(); it += 2) { const auto& set_field = *it; json set_value; try { set_value = json::parse(*(it + 1)); } catch(...) { set_value = *(it + 1); } item[set_field] = set_value; } updated_count++; } } if (updated_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(updated_count)}; }
     HandlerResult _handle_json_del(const std::vector<std::string>& args) { if (args.empty()) return {400, "-ERR wrong number of arguments"}; if (args.size() == 1) return _handle_del(args); if (args.size() != 4 || args[1] != "WHERE") return {400, "-ERR syntax: JSON.DEL <key> [WHERE <field> <value>]"}; const auto& key = args[0]; const auto& field = args[2]; json value_to_find; try { value_to_find = json::parse(args[3]); } catch (...) { value_to_find = args[3]; } std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR WHERE clause can only be used on JSON arrays."}; auto original_array_size = doc.size(); doc.erase(std::remove_if(doc.begin(), doc.end(), [&](const json& item) { return item.is_object() && item.contains(field) && item[field] == value_to_find; }), doc.end()); auto deleted_count = original_array_size - doc.size(); if (deleted_count == 0) return {200, "0"}; std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(deleted_count)}; }
-    HandlerResult _handle_json_search(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR syntax: JSON.SEARCH <key> \"<term>\""}; const auto& key = args[0]; const auto& term = args[1]; std::string result_dump; { std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR not a valid JSON document"}; } bool found = false; if (doc.is_array()) { for (const auto& item : doc) { if (json_contains_text(item, term)) { result_dump = item.dump(2); found = true; break; } } } else { if (json_contains_text(doc, term)) { result_dump = doc.dump(2); found = true; } } if (!found) return {404, "(nil)"}; } { std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; _update_lru(key); } return {200, result_dump}; }
+    // ** UPDATED: The new high-performance, whole-word JSON search implementation **
+    HandlerResult _handle_json_search(const std::vector<std::string>& args) {
+        // Syntax: JSON.SEARCH <key> "<term>" [MAX <count>]
+        if (args.size() != 2 && args.size() != 4) {
+            return {400, "-ERR syntax: JSON.SEARCH <key> \"<term>\" [MAX <count>]"};
+        }
+        
+        const auto& key = args[0];
+        const auto& term = args[1];
+        if (term.empty()) {
+            return {400, "-ERR search term cannot be empty"};
+        }
+
+        size_t max_results = std::numeric_limits<size_t>::max(); // Default to all matches
+        if (args.size() == 4) {
+            std::string mode = args[2];
+            std::transform(mode.begin(), mode.end(), mode.begin(), ::toupper);
+            if (mode != "MAX") {
+                return {400, "-ERR expected MAX keyword after term"};
+            }
+            try {
+                long long count = std::stoll(args[3]);
+                if (count <= 0) {
+                     return {400, "-ERR MAX count must be a positive integer"};
+                }
+                max_results = static_cast<size_t>(count);
+            } catch (...) {
+                return {400, "-ERR invalid number for MAX count"};
+            }
+        }
+
+        std::string result_dump;
+        {
+            std::shared_lock<std::shared_mutex> lock(data_mutex_);
+            if (!kv_store_.count(key)) return {404, "(nil)"};
+
+            json doc;
+            try {
+                doc = json::parse(kv_store_.at(key));
+            } catch (...) {
+                return {500, "-ERR not a valid JSON document"};
+            }
+            
+            json results = json::array();
+            
+            if (doc.is_array()) {
+                for (const auto& item : doc) {
+                    if (results.size() >= max_results) {
+                        break;
+                    }
+                    if (json_contains_word(item, term)) {
+                        results.push_back(item);
+                    }
+                }
+            } else {
+                // If the doc is a single object or value
+                if (max_results > 0 && json_contains_word(doc, term)) {
+                    results.push_back(doc);
+                }
+            }
+
+            if (results.empty()) {
+                return {404, "(nil)"};
+            }
+            
+            // For client-side consistency, the result is always a JSON array of matches
+            result_dump = results.dump(2);
+        }
+        
+        // Update LRU cache
+        {
+            std::unique_lock<std::shared_mutex> lock(data_mutex_);
+            if (!kv_store_.count(key)) return {404, "(nil)"}; // Check again in case it was evicted
+            _update_lru(key);
+        }
+        
+        return {200, result_dump};
+    }
     HandlerResult _handle_json_append(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments. Syntax: JSON.APPEND <key> '<json_to_append>'"}; const auto& key = args[0]; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(key)) return {404, "(nil)"}; unsigned long long old_size = key.size() + kv_store_.at(key).size(); json doc; try { doc = json::parse(kv_store_.at(key)); } catch (...) { return {500, "-ERR value at key is not a valid JSON document"}; } if (!doc.is_array()) return {400, "-ERR APPEND requires the value at key to be a JSON array"}; json new_json; try { new_json = json::parse(args[1]); } catch(const json::parse_error& e) { return {400, std::string("-ERR invalid JSON for append: ") + e.what()}; } if (new_json.is_object()) { doc.push_back(new_json); } else if (new_json.is_array()) { doc.insert(doc.end(), new_json.begin(), new_json.end()); } else { return {400, "-ERR append value must be a JSON object or array"}; } std::string new_dump = doc.dump(); kv_store_[key] = new_dump; estimated_memory_usage_ += (key.size() + new_dump.size()) - old_size; _update_lru(key); dirty_operations_++; _enforce_memory_limit(); if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, std::to_string(doc.size())}; }
     HandlerResult _handle_ttl(const std::vector<std::string>& args) { if (args.size() != 1) return {400, "-ERR wrong number of arguments"}; std::shared_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; if (!ttl_map_.count(args[0])) return {200, "-1"}; auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); long long expiry_ms = ttl_map_.at(args[0]); if (now_ms > expiry_ms) return {404, "(nil)"}; return {200, std::to_string((expiry_ms - now_ms) / 1000)}; }
     HandlerResult _handle_expire(const std::vector<std::string>& args) { if (args.size() != 2) return {400, "-ERR wrong number of arguments"}; std::unique_lock<std::shared_mutex> lock(data_mutex_); if (!kv_store_.count(args[0])) return {404, "(nil)"}; try { long long ttl_s = std::stoll(args[1]); if (ttl_s <= 0) { ttl_map_.erase(args[0]); } else { ttl_map_[args[0]] = std::chrono::duration_cast<std::chrono::milliseconds>((std::chrono::system_clock::now() + std::chrono::seconds(ttl_s)).time_since_epoch()).count(); } } catch (...) { return {400, "-ERR invalid TTL value"}; } dirty_operations_++; if (BATCH_PROCESSING_SIZE.load() == 0) _save_to_file_unlocked(DATABASE_FILENAME); return {200, "+OK"}; }

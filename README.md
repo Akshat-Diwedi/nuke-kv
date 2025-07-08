@@ -1,4 +1,4 @@
-## NukeKV ☢️ - A High-Performance Key-Value Store (v2.5-stable-♾️)
+## NukeKV ☢️ - A High-Performance Key-Value Store
 
 Welcome to NukeKV, a lightweight, fast, and persistent key-value database server written in modern C++. It communicates via a custom, high-performance raw TCP protocol called **`Nuke-Wire`**, making it an exceptionally low-latency solution. This version includes **Advanced JSON Functionality**, allowing for complex CRUD operations and list manipulations inside your stored data.
 
@@ -22,24 +22,23 @@ Welcome to NukeKV, a lightweight, fast, and persistent key-value database server
 ### Compiling the code :
 
 - Just `fork/clone` the repo first then in your machine's terminal - run the following commands according to your Operating System given below ⬇️ .
+
 #### *For windows users :*
 
 ```powershell
 # Install g++ via MSYS2 or another package manager.
 # The -lpsapi flag is required for memory usage statistics.
 g++ -std=c++17 -O2 -Ilibs -o nukekv-server.exe server.cpp -static -lpthread -lws2_32 -lwsock32 -lpsapi
-  
 # Run the server
 .\nukekv-server.exe
 ```
 
 #### *For Linux (Ubuntu, Debian, etc.) or macOS Users :*
-  
+
 ```bash
 # Install compiler if you don't have it
 # sudo apt-get update && sudo apt-get install -y g++ (On Debian/Ubuntu)
 g++ -std=c++17 -O2 -Ilibs -o nukekv-server server.cpp -lpthread
-  
 # Run the server
 ./nukekv-server
 ```
@@ -47,74 +46,78 @@ g++ -std=c++17 -O2 -Ilibs -o nukekv-server server.cpp -lpthread
 ### Client ⚡
 
 To connect to and query your server, use the provided `client.js` application. Make sure Node.js is installed. Update the `host` in `client.js` to your server's IP address (the server will display its public IP on startup) and run the client:
-  
+
 ```bash
 node client.js
 ```
-  
+
 ---
 
 ### Command Reference
 
 ### Server & Diagnostics
 
-| Command               | Description                                                            |
-| :-------------------- | :--------------------------------------------------------------------- |
-| `PING`                | Returns `+PONG`. Useful for checking if the server is responsive.      |
-| `DEBUG <true\|false>` | Enables or disables performance logging for each command.              |
-| `STATS`               | Shows detailed statistics about the server's state and performance.    |
-| `STRESS <count>`      | Runs a benchmark with `<count>` ops. **This is non-persistent and will not affect the database file.** |
-| `CLRDB`               | Deletes all keys and values from the database.                         |
-| `QUIT`                | Instructs the server to perform a final save and shut down gracefully. |
+| Command                   | Description                                                                                          |
+| :------------------------ | :--------------------------------------------------------------------------------------------------- |
+| `PING`                    | Returns `+PONG`. Useful for checking if the server is responsive.                                    |
+| `DEBUG <true\|false>`     | Enables or disables performance logging for each command.                                            |
+| `STATS`                   | Shows detailed statistics about the server's state and performance.                                  |
+| `STRESS <count>`          | Runs a benchmark with `<count>` ops. **This is non-persistent and will not affect the database file.** |
+| `CLRDB`                   | Deletes all keys and values from the database.                                                       |
+| `QUIT`                    | Instructs the server to perform a final save and shut down gracefully.                               |
 
 ### Basic Key-Value Commands
 
-| Command                        | Description                                                                    |
+| Command                        | Description                                                                    |
 | :----------------------------- | :----------------------------------------------------------------------------- |
-| `SET <key> "<value>"`          | Sets a key to a string value. The value **must** be enclosed in double quotes. |
-| `SET <key> "<value>" EX <sec>` | Sets a key with an TTL. The value **must** be enclosed in double quotes.       |
-| `GET <key>`                    | Retrieves the value of a key. Returns `(nil)` if not found.                    |
-| `UPDATE <key> "<new_value>"`   | Updates an existing key. The value **must** be enclosed in double quotes.      |
-| `DEL <key> [key2...]`          | Deletes one or more keys. Returns the count of deleted keys.                   |
-| `INCR <key> [amount]`          | Increments a numeric key by 1 or by a given `amount`.                          |
-| `DECR <key> [amount]`          | Decrements a numeric key by 1 or by a given `amount`.                          |
-| `TTL <key>`                    | Gets the remaining time-to-live of a key in seconds. Returns `-1` if no TTL.   |
-| `EXPIRE <key> <seconds>`       | Sets or updates the TTL for an existing key.                                   |
-| `SIMILAR <prefix>`             | Returns the number of keys that start with the given prefix.                   |
+| `SET <key> "<value>"`          | Sets a key to a string value. The value **must** be enclosed in double quotes. |
+| `SET <key> "<value>" EX <sec>` | Sets a key with an TTL. The value **must** be enclosed in double quotes.       |
+| `GET <key>`                    | Retrieves the value of a key. Returns `(nil)` if not found.                    |
+| `UPDATE <key> "<new_value>"`   | Updates an existing key. The value **must** be enclosed in double quotes.      |
+| `DEL <key> [key2...]`          | Deletes one or more keys. Returns the count of deleted keys.                   |
+| `INCR <key> [amount]`          | Increments a numeric key by 1 or by a given `amount`.                          |
+| `DECR <key> [amount]`          | Decrements a numeric key by 1 or by a given `amount`.                          |
+| `TTL <key>`                    | Gets the remaining time-to-live of a key in seconds. Returns `-1` if no TTL.   |
+| `EXPIRE <key> <seconds>`       | Sets or updates the TTL for an existing key.                                   |
+| `SIMILAR <prefix>`             | Returns the number of keys that start with the given prefix.                   |
 
 ---
-  
-### Advanced JSON Commands
 
-NukeKV supports storing **any valid JSON**, including arrays of objects, and provides powerful tools to query and manipulate them. Keywords like `WHERE` and `SET` are case-insensitive.
+### Advanced JSON Commands & Examples
 
-| Command                                        | Description                                                                                              |
-| :--------------------------------------------- | :------------------------------------------------------------------------------------------------------- |
-| `JSON.SET <key> '<json_string>'`               | Sets a key to any valid JSON. The JSON string **must** be enclosed in single quotes.                     |
-| `JSON.GET <key> [path...]`                     | Retrieves the entire JSON document, or specific fields using JSONPath-like syntax (`$.field`).            |
-| `JSON.GET <key> WHERE <field> <value>`         | Filters a JSON array, returning only objects where `<field>` equals `<value>`.                           |
-| `JSON.UPDATE <key> WHERE <f> <v> SET <f1> <v1>`| Updates one or more fields in objects that match the `WHERE` clause.                                     |
-| `JSON.SEARCH <key> "<term>"`                   | Performs a text search and returns the first matching object. The term **must** be a double-quoted string. |
-| `JSON.DEL <key> WHERE <field> <value>`         | Deletes objects from a JSON array where `<field>` matches `<value>`.                                     |
-| `JSON.APPEND <key> '<json_to_append>'`         | Appends a JSON object or array elements to an existing array. The JSON **must** be in single quotes.      |
+NukeKV supports storing **any valid JSON**, including arrays of objects, and provides powerful tools to query and manipulate them. Keywords like `WHERE`, `SET`, and `MAX` are case-insensitive.
 
+| Command                                       | Description                                                                                                                                                              |
+| :---------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JSON.SET <key> '<json_string>'`                | Sets a key to any valid JSON. The JSON string **must** be enclosed in single quotes.                                                                                     |
+| `JSON.GET <key> [path...]`                      | Retrieves the entire JSON document, or specific fields using JSONPath-like syntax (`$.field`).                                                                         |
+| `JSON.GET <key> WHERE <field> <value>`          | Filters a JSON array, returning only objects where `<field>` equals `<value>`.                                                                                           |
+| `JSON.UPDATE <key> WHERE <f> <v> SET <f1> <v1>` | Updates one or more fields in objects that match the `WHERE` clause.                                                                                                     |
+| `JSON.SEARCH <key> "<term>" [MAX <count>]`      | Performs a case-insensitive, **whole-word** search across a JSON document and returns an array of matching objects. The term **must** be a double-quoted string. `MAX` is optional and limits the number of results. |
+| `JSON.DEL <key> WHERE <field> <value>`          | Deletes objects from a JSON array where `<field>` matches `<value>`.                                                                                                     |
+| `JSON.APPEND <key> '<json_to_append>'`          | Appends a JSON object or array elements to an existing array. The JSON **must** be in single quotes.                                                                     |
 
 #### **Complete JSON Workflow Example**
 
 Let's use a `user` object and a `products` catalog.
 
 **1. Set an initial JSON object:**
+
 ```bash
 JSON.SET user '{"id": 101, "name": "akshat", "email": "akshatdiwedi151@gmail.com", "age": 18, "active": true}'
 ```
 *Server Response:* `+OK`
 
 **2. Get specific fields from the object:**
+
 The `$` prefix is optional. Response keys are always clean.
+
 ```bash
 JSON.GET user $.email age
 ```
+
 *Server Response:*
+
 ```json
 {
   "email": "akshatdiwedi151@gmail.com",
@@ -123,22 +126,29 @@ JSON.GET user $.email age
 ```
 
 **3. Set an initial JSON array for a product catalog:**
+
 ```bash
 JSON.SET products '[{"id":1,"name":"Smartphone X23","stock":50}]'
 ```
+
 *Server Response:* `+OK`
 
 **4. Append a new product to the array:**
+
 ```bash
 JSON.APPEND products '{"id":2, "name":"Laptop ProBook", "stock":20}'
 ```
+
 *Server Response (new array size):* `2`
 
 **5. Get a specific product using `WHERE`:**
+
 ```bash
 JSON.GET products WHERE id 2
 ```
+
 *Server Response:*
+
 ```json
 [
   {
@@ -150,16 +160,21 @@ JSON.GET products WHERE id 2
 ```
 
 **6. Update a product's stock and add a new field:**
+
 ```bash
 JSON.UPDATE products WHERE name "Laptop ProBook" SET stock 15 "on_sale" true
 ```
+
 *Server Response (items updated):* `1`
 
 **7. Verify the final state:**
+
 ```bash
 JSON.GET products
 ```
+
 *Server Response:*
+
 ```json
 [
   {
@@ -176,23 +191,79 @@ JSON.GET products
 ]
 ```
 
+#### **`JSON.SEARCH` in Action**
+
+The new search is smarter. It matches whole words, case-insensitively, and lets you limit results.
+
+**1. Set up some data for searching:**
+
+```bash
+JSON.SET articles '[{"id":1, "title": "Intro to AI"}, {"id":2, "title": "Financial Aid Guide"}, {"id":3, "title": "Advanced AI techniques"}, {"id":4, "title": "First Aid basics"}]'
+```
+
+*Server Response:* `+OK`
+
+**2. Perform a whole-word search:**
+
+Notice how it will find `"AI"` but correctly ignore the substring in `"Aid"`.
+
+```bash
+JSON.SEARCH articles "ai"
+```
+
+*Server Response (returns all matching objects):*
+
+```json
+[
+  {
+    "id": 1,
+    "title": "Intro to AI"
+  },
+  {
+    "id": 3,
+    "title": "Advanced AI techniques"
+  }
+]
+```
+
+**3. Use `MAX` to limit the results:**
+
+This time, we'll only ask for a maximum of 1 result.
+
+```bash
+JSON.SEARCH articles "ai" MAX 1
+```
+
+*Server Response (returns only the first match):*
+
+```json
+[
+  {
+    "id": 1,
+    "title": "Intro to AI"
+  }
+]
+```
+
 ---
 
-## Diagnostics Output 🩹✨ (v2.5-stable-♾️)
+## Diagnostics Output
 
 ### STATS
 
 The `STATS` command provides a real-time, reformatted snapshot of the server.
 
 **Example Command:**
+
 ```bash
 STATS
 ```
 
 **Example Output:**
+
 ```
-Version: NukeKV v2.5-stable-♾️ ☢️
-Protocol: Nuke-Wire (RAW TCP)
+Version: NukeKV v2.5-stable-☢️
+Protocol: Nuke-Wire (CUSTOM RAW TCP)
 Debug Mode: OFF
 Worker Threads: 7
 -------------------------
@@ -217,18 +288,20 @@ The `STRESS` command benchmarks the core performance of the database without aff
 **A Note on Memory Reporting:** The `MAX RAM USAGE` metric reports the *high-water mark* of memory the process has used. On Linux/macOS, this value does not decrease even after memory is freed by the application. This is normal OS behavior and **does not indicate a memory leak.** The stress test correctly cleans up all temporary data.
 
 **Example Command:**
+
 ```bash
 STRESS 1000000
 ```
 
 **Example Output:**
+
 ```
 Stress Test running for 1000000 ops ...
 -------------------------------------------
-SET:        1262786.67 ops/sec (791.90ms total)
-UPDATE:     2618733.44 ops/sec (381.86ms total)
-GET:        2833786.03 ops/sec (352.88ms total)
-DEL:        1503694.33 ops/sec (665.03ms total)
+SET:         1262786.67 ops/sec (791.90ms total)
+UPDATE:      2618733.44 ops/sec (381.86ms total)
+GET:         2833786.03 ops/sec (352.88ms total)
+DEL:         1503694.33 ops/sec (665.03ms total)
 -------------------------------------------
 MAX RAM USAGE: 134.95 MB
 Total Stress Test Time: 2.297s
