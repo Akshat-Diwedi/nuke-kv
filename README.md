@@ -308,3 +308,9 @@ Total Stress Test Time: 2.297s
 ```
 
 **`note`**: The above `STRESS` command's output is a real benchmark. We ran this test on a Google Cloud Compute Engine `E2` instance with `2 vCPU`, `1 Core`, & `4GB RAM`. The command `STRESS 1000000` runs 1 million operations for *each* of the 4 commands (SET, UPDATE, GET, DEL), totaling 4 million operations in a single run.
+
+---
+
+### Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Akshat-Diwedi/nuke-kv&type=Date)](https://www.star-history.com/#Akshat-Diwedi/nuke-kv&Date)
